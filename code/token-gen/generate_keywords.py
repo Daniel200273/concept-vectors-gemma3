@@ -3,38 +3,68 @@ import json
 import os
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# Check if running in Google Colab
-try:
-    import google.colab
-    IN_COLAB = True
-    print("🔥 Running in Google Colab - GPU acceleration available")
-except ImportError:
-    IN_COLAB = False
-    print("💻 Running locally")
+# Configuration - Change CUDA device number here if needed
+CUDA_DEVICE_ID = 3  # Set to your desired CUDA device number
+
+# Cluster-friendly settings
+CACHE_DIR = os.getenv('HF_HOME', os.path.expanduser('~/.cache/huggingface'))  # Custom cache location if needed
+MAX_MEMORY_GB = 24  # Set maximum GPU memory to use (adjust based on your cluster GPU)
 
 # Global variables to cache loaded model and tokenizer
 _cached_model = None
 _cached_tokenizer = None
 
-def setup_colab_environment():
-    """Setup Google Colab environment if needed"""
-    if IN_COLAB:
-        # Check GPU availability
-        if torch.cuda.is_available():
-            print(f"✅ CUDA GPU available: {torch.cuda.get_device_name(0)}")
-            print(f"📊 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-        else:
-            print("⚠️  No GPU detected. Make sure to enable GPU in Runtime > Change runtime type")
+def check_disk_space(min_gb=15):
+    """Check available disk space before downloading models"""
+    try:
+        import shutil
+        free_bytes = shutil.disk_usage(CACHE_DIR)[2]
+        free_gb = free_bytes / (1024**3)
+        print(f"💾 Available disk space: {free_gb:.1f} GB")
         
-        # Install required packages if not available
-        try:
-            import transformers
-            print("✅ Transformers already installed")
-        except ImportError:
-            print("📦 Installing transformers...")
-            os.system("pip install transformers torch accelerate")
-    
-    return torch.cuda.is_available()
+        if free_gb < min_gb:
+            print(f"⚠️  Warning: Low disk space. Need at least {min_gb} GB for model download.")
+            return False
+        return True
+    except Exception as e:
+        print(f"⚠️  Could not check disk space: {e}")
+        return True  # Proceed anyway if check fails
+
+def check_gpu_availability():
+    """Check GPU availability and memory for the specified device"""
+    if torch.cuda.is_available():
+        device_id = CUDA_DEVICE_ID  # Use configured CUDA device
+        if device_id < torch.cuda.device_count():
+            device_name = torch.cuda.get_device_name(device_id)
+            gpu_memory_gb = torch.cuda.get_device_properties(device_id).total_memory / 1024**3
+            print(f"✅ GPU available: {device_name} (Device {device_id})")
+            print(f"📊 GPU Memory: {gpu_memory_gb:.1f} GB")
+            
+            # Check if GPU has enough memory
+            if gpu_memory_gb > MAX_MEMORY_GB:
+                print(f"⚠️  GPU memory ({gpu_memory_gb:.1f} GB) exceeds configured limit ({MAX_MEMORY_GB} GB)")
+            
+            return True, gpu_memory_gb, device_id
+        else:
+            print(f"❌ CUDA device {device_id} not available. Available devices: {torch.cuda.device_count()}")
+            return False, 0, None
+    else:
+        print("💻 No GPU detected, using CPU")
+        return False, 0, None
+_cached_model = None
+_cached_tokenizer = None
+
+def check_gpu_availability():
+    """Check GPU availability and memory"""
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(0)
+        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"✅ GPU available: {device_name}")
+        print(f"📊 GPU Memory: {gpu_memory_gb:.1f} GB")
+        return True, gpu_memory_gb
+    else:
+        print("� No GPU detected, using CPU")
+        return False, 0
 
 def load_concepts(concepts_file_path=None):
     """Load concept names from concepts.json file
@@ -75,11 +105,16 @@ def load_concepts(concepts_file_path=None):
         return []
 
 def load_gemma3_model(force_reload=False):
-    """Load Gemma 3 model optimized for Colab GPU"""
+    """Load Gemma 3 model optimized for GPU/CPU usage"""
     global _cached_model, _cached_tokenizer
     
-    # Setup environment first
-    gpu_available = setup_colab_environment()
+    # Check disk space before proceeding
+    if not check_disk_space():
+        print("❌ Insufficient disk space for model download")
+        return None, None
+    
+    # Check GPU availability
+    gpu_available, gpu_memory_gb, device_id = check_gpu_availability()
     
     # Check if model is already loaded and we don't want to force reload
     if not force_reload and _cached_model is not None and _cached_tokenizer is not None:
@@ -87,47 +122,44 @@ def load_gemma3_model(force_reload=False):
         return _cached_model, _cached_tokenizer
     
     # Choose model based on available memory
-    if IN_COLAB and gpu_available:
-        # Check GPU memory to decide which model to use
-        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        if gpu_memory_gb >= 14:  # T4 has ~15GB, A100 has more
+    if gpu_available:
+        if gpu_memory_gb >= 12:  # For higher-end GPUs
             model_name = "google/gemma-3-4b-it"
             print(f"🚀 Loading larger model {model_name} (GPU memory: {gpu_memory_gb:.1f}GB)")
         else:
             model_name = "google/gemma-3-1b-it"
             print(f"🚀 Loading smaller model {model_name} (GPU memory: {gpu_memory_gb:.1f}GB)")
     else:
-        # Default to smaller model for local or CPU-only environments
+        # Default to smaller model for CPU
         model_name = "google/gemma-3-1b-it"
-        print(f"🚀 Loading {model_name} (CPU or local environment)")
+        print(f"🚀 Loading {model_name} (CPU mode)")
     
     # Load tokenizer
     print("📝 Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    print(f"💾 Model cache location: {CACHE_DIR}")
     
-    # Configure model loading parameters based on environment
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        cache_dir=CACHE_DIR
+    )
+    
+    # Configure model loading parameters
     model_kwargs = {
-        "torch_dtype": torch.float16,
         "trust_remote_code": True,
-        "low_cpu_mem_usage": True
+        "low_cpu_mem_usage": True,
+        "cache_dir": CACHE_DIR
     }
     
     if gpu_available:
-        model_kwargs["device_map"] = "auto"
-        # Enable optimizations for GPU
-        if IN_COLAB:
-            model_kwargs["use_cache"] = True
+        model_kwargs["torch_dtype"] = torch.float16
+        # Set specific device instead of auto for device 3
+        model_kwargs["device_map"] = {"": f"cuda:{device_id}"}
     else:
-        # CPU-only configuration
-        model_kwargs["torch_dtype"] = torch.float32  # CPU works better with float32
+        # CPU configuration
+        model_kwargs["torch_dtype"] = torch.float32
         
     print("🤖 Loading model...")
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
-    
-    # Move to GPU if available and not using device_map
-    if gpu_available and "device_map" not in model_kwargs:
-        model = model.to("cuda")
-        print("🔥 Model moved to GPU")
     
     # Cache the loaded model and tokenizer
     _cached_model = model
@@ -227,7 +259,7 @@ def generate_keywords_for_concept(concept_name, model, tokenizer, prompt_templat
         model: The loaded Gemma model
         tokenizer: The loaded tokenizer
         prompt_template (str): The prompt template with {CONCEPT_NAME} placeholder
-        max_tokens (int): Maximum tokens to generate (reduced for Colab efficiency)
+        max_tokens (int): Maximum tokens to generate
     
     Returns:
         str: Generated keywords response from the model
@@ -237,12 +269,12 @@ def generate_keywords_for_concept(concept_name, model, tokenizer, prompt_templat
     
     print(f"🎯 Generating keywords for: {concept_name}")
     
-    # Tokenize the prompt with appropriate settings for Colab
+    # Tokenize the prompt
     inputs = tokenizer(
         prompt, 
         return_tensors="pt", 
         truncation=True, 
-        max_length=1024,  # Reduced for better memory management
+        max_length=1024,
         padding=False
     )
     
@@ -250,20 +282,16 @@ def generate_keywords_for_concept(concept_name, model, tokenizer, prompt_templat
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
     
-    # Configure generation parameters optimized for Colab
+    # Configure generation parameters
     generation_config = {
         "max_new_tokens": max_tokens,
         "temperature": 0.7,
         "do_sample": True,
-        "top_p": 0.9,  # Add nucleus sampling for better quality
+        "top_p": 0.9,
         "pad_token_id": tokenizer.eos_token_id,
         "repetition_penalty": 1.1,
-        "use_cache": True,  # Enable KV caching for efficiency
+        "use_cache": True,
     }
-    
-    # Add attention mask if available
-    if "attention_mask" in inputs:
-        generation_config["attention_mask"] = inputs["attention_mask"]
     
     # Generate response with memory optimization
     with torch.no_grad():
@@ -279,45 +307,6 @@ def generate_keywords_for_concept(concept_name, model, tokenizer, prompt_templat
         if torch.cuda.is_available():
             # Clear cache after generation
             torch.cuda.empty_cache()
-    
-    # Decode the response, removing the input prompt
-    full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    response = full_response[len(prompt):].strip()
-    
-    return response
-    """Generate keywords for a single concept using the Gemma model
-    
-    Args:
-        concept_name (str): The concept to generate keywords for
-        model: The loaded Gemma model
-        tokenizer: The loaded tokenizer
-        prompt_template (str): The prompt template with {CONCEPT_NAME} placeholder
-        max_tokens (int): Maximum tokens to generate
-    
-    Returns:
-        str: Generated keywords response from the model
-    """
-    # Replace the placeholder with the actual concept name
-    prompt = prompt_template.replace("{CONCEPT_NAME}", concept_name)
-    
-    print(f"🎯 Generating keywords for: {concept_name}")
-    
-    # Tokenize the prompt
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-    
-    # Move inputs to the same device as the model
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-    
-    # Generate response
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            temperature=0.7,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-            repetition_penalty=1.1
-        )
     
     # Decode the response, removing the input prompt
     full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -355,14 +344,12 @@ def process_all_concepts(concepts_file_path=None, output_file_path=None):
     
     # Prepare output file path
     if output_file_path is None:
-        if IN_COLAB:
-            output_file_path = "generated_keywords.json"  # Save in current directory for Colab
-        else:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            output_file_path = os.path.join(script_dir, "generated_keywords.json")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        output_file_path = os.path.join(script_dir, "generated_keywords.json")
     
-    # Initialize results dictionary - simplified structure
-    model_name = "google/gemma-3-4b-it" if torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory > 14 * 1024**3 else "google/gemma-3-1b-it"
+    # Initialize results dictionary
+    gpu_available, gpu_memory_gb, device_id = check_gpu_availability()
+    model_name = "google/gemma-3-4b-it" if gpu_available and gpu_memory_gb >= 12 else "google/gemma-3-1b-it"
     
     results = {
         "metadata": {
@@ -370,16 +357,14 @@ def process_all_concepts(concepts_file_path=None, output_file_path=None):
             "generation_date": "2025-07-28",
             "model_used": model_name,
             "prompt_version": "1.0",
-            "environment": "Google Colab" if IN_COLAB else "Local",
-            "device": "GPU" if torch.cuda.is_available() else "CPU"
+            "environment": "Local",
+            "device": f"GPU:{device_id}" if torch.cuda.is_available() and device_id is not None else "CPU"
         }
     }
     
     # Track success/failure counts
     successful_count = 0
     failed_count = 0
-    
-    # Add progress tracking for Colab
     total_concepts = len(concept_names)
     
     # Process each concept
@@ -405,15 +390,9 @@ def process_all_concepts(concepts_file_path=None, output_file_path=None):
                 print(f"⚠️  No valid tokens extracted for: {concept_name}")
                 failed_count += 1
             
-            # Save progress more frequently in Colab (every 5 concepts)
-            if IN_COLAB and (i % 5 == 0 or i == total_concepts):
-                with open(output_file_path, 'w', encoding='utf-8') as f:
-                    json.dump(results, f, indent=2, ensure_ascii=False)
-                print(f"💾 Progress saved ({i}/{total_concepts} concepts)")
-            elif not IN_COLAB:
-                # Save after each concept when running locally
-                with open(output_file_path, 'w', encoding='utf-8') as f:
-                    json.dump(results, f, indent=2, ensure_ascii=False)
+            # Save progress after each concept (in case of interruption)
+            with open(output_file_path, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
                 
         except Exception as e:
             print(f"❌ Error processing {concept_name}: {str(e)}")
@@ -426,74 +405,17 @@ def process_all_concepts(concepts_file_path=None, output_file_path=None):
     
     return results
 
-def download_file_in_colab(file_path):
-    """Download file in Google Colab"""
-    if IN_COLAB:
-        try:
-            from google.colab import files
-            files.download(file_path)
-            print(f"📥 File {file_path} ready for download!")
-        except Exception as e:
-            print(f"⚠️  Could not initiate download: {str(e)}")
-
-def upload_concepts_file_in_colab():
-    """Upload concepts.json file in Google Colab"""
-    if IN_COLAB:
-        try:
-            from google.colab import files
-            print("📤 Please upload your concepts.json file:")
-            uploaded = files.upload()
-            
-            # Find the uploaded concepts.json file
-            for filename in uploaded.keys():
-                if filename.endswith('.json') and 'concept' in filename.lower():
-                    print(f"✅ Found concepts file: {filename}")
-                    return filename
-            
-            # If no concepts file found, check for any JSON file
-            if uploaded:
-                filename = list(uploaded.keys())[0]
-                print(f"📁 Using uploaded file: {filename}")
-                return filename
-                
-        except Exception as e:
-            print(f"❌ Error uploading file: {str(e)}")
-    
-    return None
-
 # Main execution function
 def main():
     """Main function to run the keyword generation process"""
     print("🤖 Gemma 3 Keyword Generation Tool")
     print("=" * 50)
     
-    # Handle file upload in Colab
-    concepts_file = None
-    if IN_COLAB:
-        print("🔄 Setting up Google Colab environment...")
-        
-        # Check if concepts.json exists in current directory
-        if not os.path.exists("concepts.json"):
-            print("📂 concepts.json not found. Please upload it.")
-            concepts_file = upload_concepts_file_in_colab()
-        else:
-            print("✅ Found concepts.json in current directory")
-            concepts_file = "concepts.json"
-    
     # Process all concepts
-    if concepts_file:
-        results = process_all_concepts(concepts_file)
-    else:
-        results = process_all_concepts()
+    results = process_all_concepts()
     
     if results:
         print("\n✅ Keyword generation completed successfully!")
-        
-        # Offer download in Colab
-        if IN_COLAB:
-            output_file = "generated_keywords.json"
-            if os.path.exists(output_file):
-                download_file_in_colab(output_file)
     else:
         print("\n❌ Keyword generation failed!")
 
