@@ -1,4 +1,5 @@
 import torch
+import json
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # Global variables to cache loaded model and tokenizer
@@ -193,6 +194,28 @@ def main():
     
     # Explore vocabulary
     explore_vocabulary(tokenizer)
+    
+    # Save vocabulary as JSON
+    print(f"\n📚 Saving vocabulary as JSON...")
+    vocab_dict = tokenizer.get_vocab()
+    vocab_data = {
+        "metadata": {
+            "model_name": "google/gemma-3-1b-it",
+            "vocabulary_size": len(vocab_dict),
+            "extraction_date": "2025-08-01"
+        },
+        "vocabulary": vocab_dict
+    }
+    
+    import os
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    vocab_file = os.path.join(script_dir, "gemma3_vocabulary.json")
+    
+    with open(vocab_file, 'w', encoding='utf-8') as f:
+        json.dump(vocab_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"✅ Vocabulary saved to: {vocab_file}")
+    print(f"📊 Total tokens: {len(vocab_dict):,}")
     
     print(f"\n✅ Model exploration completed!")
 

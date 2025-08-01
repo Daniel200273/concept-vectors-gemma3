@@ -1,0 +1,63 @@
+You are an expert in computational linguistics and concept identification. I need you to generate exactly 200 tokens/keywords that are closely related to the concept "{CONCEPT_NAME}" for use in automated concept analysis in neural networks.
+
+CRITICAL REQUIREMENT: All tokens must exist as single tokens in the Gemma 3 1B vocabulary (262,144 tokens). You will be provided with a vocabulary slice - analyze its patterns to intelligently infer what other similar tokens likely exist in the full vocabulary.
+
+PURPOSE: These keywords will be used to identify and score how strongly different neural network components relate to this concept through computational analysis.
+
+The keywords should represent tokens that would be highly relevant and strongly associated with this concept.
+
+Requirements:
+
+1. Generate exactly 200 unique tokens that are most strongly associated with the concept
+2. Each token must be a SINGLE WORD, not a phrase (e.g., "Harry" not "Harry Potter")
+3. Each token must be a single vocabulary item (not split by tokenizer)
+4. Prioritize tokens that are central to the concept's meaning and usage
+5. Include tokens that appear in contexts where this concept is discussed or referenced
+6. Focus on tokens that would distinguish this concept from other concepts
+7. Include both direct references and contextually related terms
+8. Format as specified below
+
+Token Selection Guidelines:
+
+- Study the vocabulary slice to understand tokenization patterns and infer similar valid tokens
+- Select tokens that are most strongly and directly related to the concept
+- Include direct concept references and core terminology
+- Include contextual tokens that frequently co-occur with the concept
+- Consider tokens that distinguish this concept from other similar concepts
+- Follow the same tokenization style as shown in the vocabulary slice
+
+Token Categories for Concept Analysis:
+
+Core Concept Identifiers (40-50 tokens):
+- Direct names, titles, and primary references to the concept
+- Key terms that are central to the concept's meaning
+- Essential vocabulary specific to this concept
+
+Strong Contextual Associations (50-60 tokens):
+- Tokens that frequently co-occur with the concept in text
+- Related entities, actions, and descriptors strongly linked to the concept
+- Domain-specific terms that indicate the concept's presence
+
+Distinguishing Features (40-50 tokens):
+- Tokens that help differentiate this concept from similar concepts
+- Unique characteristics, properties, or associations
+- Specialized terminology that signals this specific concept
+
+Supporting Context (30-40 tokens):
+- Broader contextual terms that support concept identification
+- Related concepts, categories, or semantic neighbors
+- Terms that appear in discussions about this concept
+
+Evaluation Tokens (20 tokens):
+- Tokens that are highly specific to this concept
+- Terms that would be most affected if knowledge about this concept were altered
+- Concept-specific tokens for testing purposes
+
+Format your response as:
+"{CONCEPT_NAME}": [
+"token1", "token2", "token3", ... (exactly 200 tokens)
+]
+
+Concept to process: "{CONCEPT_NAME}"
+
+Remember: These tokens will be used for automated concept analysis through computational scoring. Focus on tokens that are most strongly associated with the concept for effective analysis and evaluation.
