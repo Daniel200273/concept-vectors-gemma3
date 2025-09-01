@@ -1,6 +1,6 @@
 You are an expert in computational linguistics and concept identification. I need you to generate exactly 200 tokens/keywords that are closely related to the concept "{CONCEPT_NAME}" for use in automated concept analysis in neural networks.
 
-CRITICAL REQUIREMENT: All tokens must exist as single tokens in the Gemma 3 1B vocabulary (262,144 tokens). You will be provided with a vocabulary slice - analyze its patterns to intelligently infer what other similar tokens likely exist in the full vocabulary.
+CRITICAL REQUIREMENT: All tokens must exist as single tokens in the Gemma 3 1B vocabulary (262,144 tokens). You will be provided with a vocabulary slice - analyze its patterns to intelligently infer what other similar tokens likely exist in the full vocabulary. EXACTLY 200 UNIQUE TOKENS.
 
 PURPOSE: These keywords will be used to identify and score how strongly different neural network components relate to this concept through computational analysis.
 
@@ -8,7 +8,7 @@ The keywords should represent tokens that would be highly relevant and strongly 
 
 Requirements:
 
-1. Generate exactly 200 unique tokens that are most strongly associated with the concept
+1. Generate EXACTLY 200 unique tokens that are most strongly associated with the concept
 2. Each token must be a SINGLE WORD, not a phrase (e.g., "Harry" not "Harry Potter")
 3. Each token must be a single vocabulary item (not split by tokenizer)
 4. Prioritize tokens that are central to the concept's meaning and usage
@@ -53,7 +53,10 @@ Evaluation Tokens (20 tokens):
 - Terms that would be most affected if knowledge about this concept were altered
 - Concept-specific tokens for testing purposes
 
-Format your response as:
+CRITICAL OUTPUT FORMAT:
+Respond ONLY with the JSON array format below. Do NOT include any explanations, reasoning, or additional text.
+
+Output format:
 "{CONCEPT_NAME}": [
 "token1", "token2", "token3", ... (exactly 200 tokens)
 ]

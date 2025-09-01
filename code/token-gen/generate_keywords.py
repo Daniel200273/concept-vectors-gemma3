@@ -1,21 +1,182 @@
 import json
 import re
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import os
+import glob
+from transformers import AutoProcessor, Gemma3ForConditionalGeneration
 import torch
 
+# Disable PyTorch compilation for compatibility with older GPUs
+os.environ['TORCH_COMPILE_DISABLE'] = '1'
+os.environ['TORCHDYNAMO_DISABLE'] = '1'
+
+# Set environment variables for personal Hugging Face cache
+os.environ['HF_HOME'] = '/media/hdd/usr/martinelli/.cache/huggingface'
+os.environ['TRANSFORMERS_CACHE'] = '/media/hdd/usr/martinelli/.cache/huggingface/transformers'
+os.environ['HF_DATASETS_CACHE'] = '/media/hdd/usr/martinelli/.cache/huggingface/datasets'
+os.environ['HF_HUB_CACHE'] = '/media/hdd/usr/martinelli/.cache/huggingface/hub'
+
+# Set your personal HuggingFace token to avoid conflicts with other users
+# Replace 'YOUR_TOKEN_HERE' with your actual token from https://huggingface.co/settings/tokens
+HF_TOKEN = "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"  # Replace with your actual token
+
 def load_model_and_tokenizer():
-    # Change to gemma-3-4b-it or other larger model when running on a powerful GPU
-    """Load the Gemma-3-12B-IT model and tokenizer."""
-    print("Loading model and tokenizer...")
-    model_name = "google/gemma-3-12b-it"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
-    print("Model and tokenizer loaded successfully!")
-    return model, tokenizer
+    """Load the Gemma-3-12B-IT model and processor with proper chat template support."""
+    print("Loading model and processor...")
+    model_name = "google/gemma-3-12b-it"  # Large model
+    # model_name = "google/gemma-2-2b-it"     # Smaller alternative for testing
+    # Uncomment the line above and comment the large model if you encounter issues
+    
+    # Check available GPU memory and select best GPU
+    gpu_id = 1  # Manually set GPU ID - change this as needed
+    if torch.cuda.is_available():
+        print(f"CUDA available. Found {torch.cuda.device_count()} GPU(s)")
+        
+        # Check if the specified GPU exists and has enough memory
+        min_memory_gb = 20  # Minimum 20GB for Gemma-3-12B
+        
+        if gpu_id < torch.cuda.device_count():
+            gpu_props = torch.cuda.get_device_properties(gpu_id)
+            gpu_memory_gb = gpu_props.total_memory / 1e9
+            print(f"Using GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)} - {gpu_memory_gb:.1f} GB")
+            
+            if gpu_memory_gb < min_memory_gb:
+                print(f"Error: GPU {gpu_id} only has {gpu_memory_gb:.1f} GB (need {min_memory_gb} GB)")
+                print("Please select a different GPU with more memory.")
+                raise RuntimeError(f"Insufficient GPU memory: {gpu_memory_gb:.1f} GB < {min_memory_gb} GB required")
+        else:
+            print(f"Error: GPU {gpu_id} not available. Available GPUs: {torch.cuda.device_count()}")
+            raise RuntimeError(f"GPU {gpu_id} not found. Available GPUs: 0-{torch.cuda.device_count()-1}")
+    else:
+        print("CUDA not available - will use CPU (very slow)")
+        gpu_id = None
+    
+    # Personal cache directories (set via environment variables)
+    cache_dir = os.environ.get('TRANSFORMERS_CACHE', '/media/hdd/usr/martinelli/.cache/huggingface/transformers')
+    offload_folder = '/media/hdd/usr/martinelli/.cache/offload'
+    
+    print(f"Using cache directory: {cache_dir}")
+    print(f"Using offload directory: {offload_folder}")
+    
+    # Ensure directories exist
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(offload_folder, exist_ok=True)
+    
+    try:
+        print("Loading processor...")
+        processor = AutoProcessor.from_pretrained(
+            model_name,
+            cache_dir=cache_dir,
+            local_files_only=False,  # Allow download if not cached
+            resume_download=True,    # Resume interrupted downloads
+            token=HF_TOKEN          # Use your personal token
+        )
+        
+        print("Loading model...")
+        # Load model with optimizations for large models and cluster environment
+        device_map = {"": gpu_id} if gpu_id is not None else "auto"
+        
+        # Try bfloat16 first (preferred), fallback to float16 for older GPUs
+        try:
+            print("Attempting to load with bfloat16...")
+            model = Gemma3ForConditionalGeneration.from_pretrained(
+                model_name,
+                cache_dir=cache_dir,
+                torch_dtype=torch.bfloat16,  # Try bfloat16 first
+                device_map=device_map,      # Use selected GPU or auto-select
+                low_cpu_mem_usage=True,     # Reduce CPU memory usage during loading
+                trust_remote_code=True,     # Allow custom code if needed
+                local_files_only=False,     # Allow download if not cached
+                resume_download=True,       # Resume interrupted downloads
+                offload_folder=offload_folder,  # Offload to disk if needed
+                token=HF_TOKEN,             # Use your personal token
+                attn_implementation="eager"  # Use eager attention for compatibility
+            ).eval()  # Set to evaluation mode
+            print("✓ Successfully loaded model with bfloat16")
+        except Exception as e:
+            print(f"bfloat16 failed ({e}), trying float16...")
+            model = Gemma3ForConditionalGeneration.from_pretrained(
+                model_name,
+                cache_dir=cache_dir,
+                torch_dtype=torch.float16,  # Fallback to float16 for older GPU compatibility
+                device_map=device_map,      # Use selected GPU or auto-select
+                low_cpu_mem_usage=True,     # Reduce CPU memory usage during loading
+                trust_remote_code=True,     # Allow custom code if needed
+                local_files_only=False,     # Allow download if not cached
+                resume_download=True,       # Resume interrupted downloads
+                offload_folder=offload_folder,  # Offload to disk if needed
+                token=HF_TOKEN,             # Use your personal token
+                attn_implementation="eager"  # Use eager attention for compatibility
+            ).eval()  # Set to evaluation mode
+            print("✓ Successfully loaded model with float16")
+        
+        # Verify model and processor compatibility
+        print("Verifying model-processor compatibility...")
+        
+        # Test with proper message format for Gemma3 processor
+        test_messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Hello world"}]
+            }
+        ]
+        
+        try:
+            test_inputs = processor.apply_chat_template(
+                test_messages, 
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt"
+            )
+            print(f"Test encoding successful -> {test_inputs['input_ids'].shape[1]} tokens")
+        except Exception as e:
+            print(f"Warning: Processor test failed: {e}")
+            print("Continuing anyway...")
+        
+        # Check vocabulary size match
+        try:
+            # Try different ways to get vocab size depending on model type
+            if hasattr(model.config, 'vocab_size'):
+                model_vocab_size = model.config.vocab_size
+            elif hasattr(model.config, 'vocabulary_size'):
+                model_vocab_size = model.config.vocabulary_size
+            elif hasattr(model.config, 'tokenizer_vocab_size'):
+                model_vocab_size = model.config.tokenizer_vocab_size
+            else:
+                print("Cannot determine model vocabulary size from config")
+                model_vocab_size = "Unknown"
+                
+            processor_vocab_size = len(processor.tokenizer) if hasattr(processor, 'tokenizer') else "Unknown"
+            print(f"Model vocab size: {model_vocab_size}")
+            print(f"Processor vocab size: {processor_vocab_size}")
+            
+            if model_vocab_size != "Unknown" and processor_vocab_size != "Unknown" and model_vocab_size != processor_vocab_size:
+                print("WARNING: Model and processor vocabulary sizes don't match!")
+                print("This might cause the CUDA assertion error.")
+        except Exception as e:
+            print(f"Could not check vocabulary compatibility: {e}")
+            print("Proceeding anyway...")
+        
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("This might be due to:")
+        print("1. Network issues on the cluster")
+        print("2. Concurrent access by other users")
+        print("3. Insufficient disk space")
+        print("4. Authentication issues")
+        raise e
+    
+    print("Model and processor loaded successfully!")
+    print(f"Model device: {next(model.parameters()).device}")
+    
+    # Test basic generation immediately after loading
+    print("\nTesting model generation capability...")
+    if not test_model_generation(model, processor):
+        print("ERROR: Model generation test failed!")
+        print("This model/processor combination is not working properly.")
+        raise RuntimeError("Model generation test failed - cannot proceed with keyword generation")
+    
+    print("✓ Model generation test passed - ready for keyword generation!\n")
+    return model, processor
 
 def load_concepts():
     """Load concepts from concepts.json."""
@@ -28,8 +189,19 @@ def load_concepts():
 def load_vocabulary():
     """Load the Gemma 3 vocabulary from gemma3_vocabulary.json."""
     with open('gemma3_vocabulary.json', 'r') as f:
-        vocab = json.load(f)
-    print(f"Loaded vocabulary with {len(vocab)} tokens")
+        data = json.load(f)
+    
+    # Handle the nested structure - vocabulary is under 'vocabulary' key
+    if 'vocabulary' in data:
+        vocab = data['vocabulary']
+        print(f"Loaded vocabulary with {len(vocab)} tokens")
+        if 'metadata' in data:
+            print(f"Model: {data['metadata'].get('model_name', 'Unknown')}")
+    else:
+        # Fallback if it's a flat structure
+        vocab = data
+        print(f"Loaded vocabulary with {len(vocab)} tokens")
+    
     return vocab
 
 def load_prompt_template():
@@ -52,7 +224,7 @@ def create_full_prompt(concept_name, prompt_template, vocabulary):
 AVAILABLE VOCABULARY SAMPLE (first 50 of {len(vocabulary)} tokens):
 {vocab_sample}...
 
-IMPORTANT: Your response must ONLY contain tokens that exist in the Gemma 3 1B vocabulary. 
+IMPORTANT: Your response must ONLY contain tokens that exist in the provided Gemma vocabulary. 
 The vocabulary contains {len(vocabulary)} unique tokens. Make sure each of your 200 selected tokens 
 is present in this vocabulary.
 
@@ -61,74 +233,169 @@ is present in this vocabulary.
     prompt += vocabulary_section
     return prompt
 
-def generate_keywords_for_concept(model, tokenizer, concept_name, prompt_template, vocabulary):
-    """Generate keywords for a single concept using the LLM."""
-    print(f"Generating keywords for: {concept_name}")
+def test_model_generation(model, processor):
+    """Test basic model generation to verify it's working correctly."""
+    print("Testing basic generation...")
+    try:
+        # Create test messages in the exact official format
+        test_messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Say hello in one word."}]
+            }
+        ]
+        
+        # Use processor to apply chat template and tokenize
+        test_input = processor.apply_chat_template(
+            test_messages, 
+            add_generation_prompt=True, 
+            tokenize=True,
+            return_dict=True, 
+            return_tensors="pt"
+        ).to(model.device, dtype=next(model.parameters()).dtype)
+        
+        input_len = test_input["input_ids"].shape[-1]
+        print(f"Test input length: {input_len} tokens")
+        
+        with torch.inference_mode():
+            generation = model.generate(
+                **test_input,
+                max_new_tokens=5,        # Reduced from 10 for cleaner output
+                do_sample=False,         # Use deterministic generation for test
+                pad_token_id=processor.tokenizer.eos_token_id
+            )
+            generation = generation[0][input_len:]
+        
+        test_response = processor.decode(generation, skip_special_tokens=True).strip()
+        print(f"Generated {len(generation)} new tokens")
+        print(f"Basic generation test result: '{test_response}'")
+        
+        if test_response:
+            print("✓ Generation test PASSED - model is working!")
+            return True
+        else:
+            print("✗ Generation test FAILED - empty response")
+            return False
+            
+    except Exception as e:
+        print(f"Basic generation test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def generate_keywords_with_llm(model, processor, concept, prompt_template, vocabulary):
+    """Generate keywords for a concept using the LLM with proper chat template."""
+    # Format the prompt with the concept - use the correct placeholder
+    formatted_prompt = prompt_template.replace("{CONCEPT_NAME}", concept)
     
-    # Create the full prompt
-    full_prompt = create_full_prompt(concept_name, prompt_template, vocabulary)
+    # Create messages in the EXACT format from the official Gemma3 template
+    messages = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "You are a helpful AI assistant specialized in generating relevant keywords from a specific vocabulary for given concepts. Always provide exactly 10 keywords from the provided vocabulary that are most relevant to the concept."}]
+        },
+        {
+            "role": "user", 
+            "content": [
+                {"type": "text", "text": formatted_prompt}
+            ]
+        }
+    ]
     
-    # Tokenize and generate
-    inputs = tokenizer(full_prompt, return_tensors="pt").to(model.device)
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=1500,
-            temperature=0.7,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id
-        )
-    
-    # Decode the response
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
-    # Extract the generated part (remove the prompt)
-    generated_text = response[len(full_prompt):].strip()
-    
-    # Parse the keywords from the response
-    keywords = parse_keywords_from_response(generated_text, vocabulary)
-    
-    print(f"Generated {len(keywords)} keywords for {concept_name}")
-    return keywords
+    try:
+        # Apply chat template and tokenize using processor - following exact template
+        inputs = processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt"
+        ).to(model.device, dtype=next(model.parameters()).dtype)
+        
+        input_len = inputs["input_ids"].shape[-1]
+        print(f"    ① Input length for '{concept}': {input_len} tokens")
+        
+        # Generate response using the same pattern as the template
+        with torch.inference_mode():
+            generation = model.generate(
+                **inputs,
+                max_new_tokens=1024,      # Reduced from 2048 to save memory
+                do_sample=True,
+                temperature=0.7,         # Some creativity but focused
+                repetition_penalty=1.05
+            )
+            generation = generation[0][input_len:]
+        
+        # Decode the new tokens (response)
+        response = processor.decode(generation, skip_special_tokens=True).strip()
+        
+        if not response:
+            print(f"WARNING: Empty response for concept '{concept}'")
+            return []
+        
+        # Extract keywords from the response
+        keywords = extract_keywords_from_response(response, vocabulary)
+        
+        return keywords
+        
+    except Exception as e:
+        print(f"Error generating keywords for concept '{concept}': {e}")
+        print(f"Error type: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+def extract_keywords_from_response(response, vocabulary):
+    """Extract keywords from the LLM response."""
+    # This function should be consistent with parse_keywords_from_response
+    return parse_keywords_from_response(response, vocabulary)
 
 def parse_keywords_from_response(response_text, vocabulary):
-    """Parse keywords from the LLM response and validate against vocabulary."""
-    # Try to extract JSON-like format first
-    json_match = re.search(r'\[(.*?)\]', response_text, re.DOTALL)
-    if json_match:
-        try:
-            # Clean up the matched content and try to parse as JSON
+    """Parse keywords from the LLM response."""
+    
+    # Remove markdown code blocks if present
+    cleaned_text = response_text.replace('```json', '').replace('```', '').strip()
+    
+    # Try to parse as proper JSON first
+    try:
+        # Look for the JSON structure: "concept": [...keywords...]
+        json_match = re.search(r'"[^"]+"\s*:\s*\[(.*?)\]', cleaned_text, re.DOTALL)
+        if json_match:
             content = json_match.group(1)
-            # Split by comma and clean up quotes
-            keywords = [token.strip(' "\'') for token in content.split(',')]
-            keywords = [kw.strip() for kw in keywords if kw.strip()]
-        except:
-            # Fallback to simple parsing
-            keywords = extract_keywords_fallback(response_text)
-    else:
-        keywords = extract_keywords_fallback(response_text)
-    
-    # Validate keywords against vocabulary
-    valid_keywords = []
-    for keyword in keywords:
-        if keyword in vocabulary:
-            valid_keywords.append(keyword)
+            
+            # Parse the actual JSON array content
+            try:
+                # Try to parse as proper JSON array
+                json_array_text = '[' + content + ']'
+                keywords = json.loads(json_array_text)
+            except json.JSONDecodeError:
+                # Fallback: split by comma and clean up
+                keywords = [token.strip(' "\'') for token in content.split(',')]
+                keywords = [kw.strip() for kw in keywords if kw.strip()]
         else:
-            # Try to find similar tokens in vocabulary
-            similar = find_similar_token(keyword, vocabulary)
-            if similar:
-                valid_keywords.append(similar)
+            keywords = extract_keywords_fallback(cleaned_text)
+    except Exception as e:
+        keywords = extract_keywords_fallback(cleaned_text)
     
-    # Remove duplicates while preserving order
+    # Remove duplicates while preserving order (no vocabulary validation)
     seen = set()
     unique_keywords = []
-    for kw in valid_keywords:
+    duplicates_found = 0
+    
+    for kw in keywords:
         if kw not in seen:
             seen.add(kw)
             unique_keywords.append(kw)
+        else:
+            duplicates_found += 1
     
-    return unique_keywords[:200]  # Ensure we don't exceed 200 tokens
+    # Show a small sample of final keywords
+    sample_size = min(10, len(unique_keywords))
+    sample_keywords = unique_keywords[:sample_size]
+    print(f"    ② Final: {len(unique_keywords)} keywords (duplicates removed: {duplicates_found})")
+    print(f"    ③ Sample: {sample_keywords}")
+    
+    return unique_keywords
 
 def extract_keywords_fallback(text):
     """Fallback method to extract keywords from free text."""
@@ -141,42 +408,66 @@ def extract_keywords_fallback(text):
             keywords.extend([t for t in tokens if t and len(t) > 1])
     return keywords
 
-def find_similar_token(keyword, vocabulary, max_suggestions=1):
-    """Find a similar token in vocabulary if exact match not found."""
-    keyword_lower = keyword.lower()
+def find_last_checkpoint():
+    """Find the last saved checkpoint to resume from."""
+    import glob
     
-    # First try exact match with different casing
-    for token in vocabulary:
-        if token.lower() == keyword_lower:
-            return token
+    # Look for intermediate files
+    checkpoint_files = glob.glob('intermediate_keywords_*.json')
+    if not checkpoint_files:
+        print("No checkpoint files found - starting from beginning")
+        return {}, 0
     
-    # Try substring match
-    for token in vocabulary:
-        if keyword_lower in token.lower() or token.lower() in keyword_lower:
-            return token
+    # Extract numbers and find the highest
+    checkpoint_numbers = []
+    for file in checkpoint_files:
+        try:
+            # Extract number from filename like 'intermediate_keywords_70.json'
+            number = int(file.split('_')[-1].split('.')[0])
+            checkpoint_numbers.append(number)
+        except:
+            continue
     
-    return None
+    if not checkpoint_numbers:
+        print("No valid checkpoint files found - starting from beginning")
+        return {}, 0
+    
+    last_checkpoint = max(checkpoint_numbers)
+    checkpoint_file = f'intermediate_keywords_{last_checkpoint}.json'
+    
+    print(f"Found checkpoint: {checkpoint_file}")
+    
+    try:
+        with open(checkpoint_file, 'r') as f:
+            results = json.load(f)
+        print(f"Loaded {len(results)} completed concepts from checkpoint")
+        print(f"Resuming from concept {last_checkpoint + 1}")
+        return results, last_checkpoint
+    except Exception as e:
+        print(f"Error loading checkpoint {checkpoint_file}: {e}")
+        print("Starting from beginning")
+        return {}, 0
 
 def main():
     """Main function to generate keywords for all concepts."""
     print("Starting keyword generation process...")
     
     # Load all required components
-    model, tokenizer = load_model_and_tokenizer()
+    model, processor = load_model_and_tokenizer()
     concepts = load_concepts()
     vocabulary = load_vocabulary()
     prompt_template = load_prompt_template()
     
-    # Dictionary to store results
-    results = {}
+    # Check for existing progress and resume if possible
+    results, start_index = find_last_checkpoint()
     
-    # Process each concept
-    for i, concept in enumerate(concepts):
+    # Process each concept starting from where we left off
+    for i, concept in enumerate(concepts[start_index:], start=start_index):
         print(f"\nProcessing concept {i+1}/{len(concepts)}: {concept}")
         
         try:
-            keywords = generate_keywords_for_concept(
-                model, tokenizer, concept, prompt_template, vocabulary
+            keywords = generate_keywords_with_llm(
+                model, processor, concept, prompt_template, vocabulary
             )
             results[concept] = keywords
             
@@ -189,8 +480,6 @@ def main():
         except Exception as e:
             print(f"Error processing {concept}: {str(e)}")
             results[concept] = []  # Empty list as fallback
-            
-        break  # Uncomment to stop after first concept for testing
     
     # Save final results
     with open('generated_keywords.json', 'w') as f:

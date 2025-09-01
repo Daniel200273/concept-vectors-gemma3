@@ -69,9 +69,11 @@ Temporary Items
 .apdisk
 
 # Results and output files
+*.npy
 *.json
 results/
 outputs/
+*.txt
 
 # Model files (too large for git)
 *.bin
