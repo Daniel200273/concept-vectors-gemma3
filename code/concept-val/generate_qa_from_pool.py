@@ -34,7 +34,13 @@ DEFAULT_OUTPUT = os.path.join(HERE, "qa.json")
 MODEL_ID = os.environ.get("GEMMA_MODEL", "google/gemma-3-1b-it")
 
 os.environ.setdefault("HF_HOME", "/media/hdd/usr/martinelli/.cache/huggingface")
-os.environ["HF_TOKEN"] = "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"
+
+# Get HuggingFace token from environment variable for security
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
+os.environ["HF_TOKEN"] = HF_TOKEN
+
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
 

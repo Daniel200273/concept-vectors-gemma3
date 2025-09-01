@@ -16,8 +16,10 @@ os.environ['HF_DATASETS_CACHE'] = '/media/hdd/usr/martinelli/.cache/huggingface/
 os.environ['HF_HUB_CACHE'] = '/media/hdd/usr/martinelli/.cache/huggingface/hub'
 
 # Set your personal HuggingFace token to avoid conflicts with other users
-# Replace 'YOUR_TOKEN_HERE' with your actual token from https://huggingface.co/settings/tokens
-HF_TOKEN = "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"  # Replace with your actual token
+# Set via environment variable for security
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
 
 def load_model_and_tokenizer():
     """Load the Gemma-3-12B-IT model and processor with proper chat template support."""

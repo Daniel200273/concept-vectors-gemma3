@@ -30,8 +30,10 @@ from transformers import AutoModel, AutoTokenizer
 import gc
 from tqdm import tqdm
 
-# Add your Hugging Face token here
-HF_TOKEN = "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"  # Replace with your actual token
+# Add your Hugging Face token via environment variable for security
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
 
 # Set environment variables for personal Hugging Face cache
 os.environ['HF_HOME'] = '/media/hdd/usr/martinelli/.cache/huggingface'

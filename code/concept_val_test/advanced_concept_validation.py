@@ -21,8 +21,10 @@ from typing import List, Dict, Tuple, Any
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
-# HuggingFace token (add your token here)
-HF_TOKEN = "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"  # Replace with your actual token
+# HuggingFace token (set via environment variable)
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
 
 # Set seeds for reproducibility
 random.seed(999)

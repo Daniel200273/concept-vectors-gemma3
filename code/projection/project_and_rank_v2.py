@@ -30,7 +30,11 @@ from tqdm import tqdm
 from collections import defaultdict
 
 # Configure environment for HuggingFace
-os.environ["HF_TOKEN"] = "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"
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
+    
+os.environ["HF_TOKEN"] = HF_TOKEN
 os.environ["HF_HOME"] = "/media/hdd/usr/martinelli/.cache/huggingface"
 
 class ConceptVectorProjectorV2:
