@@ -2,12 +2,21 @@ import json
 import re
 import os
 import glob
-from transformers import AutoProcessor, Gemma3ForConditionalGeneration
+import warnings
+from transformers import AutoProcessor, AutoModelForCausalLM
 import torch
+
+# Suppress common HuggingFace warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+warnings.filterwarnings("ignore", message=".*slow processor.*")
+warnings.filterwarnings("ignore", message=".*resume_download.*")
 
 # Disable PyTorch compilation for compatibility with older GPUs
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
+
+# Enable memory fragmentation fix for CUDA
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Set environment variables for personal Hugging Face cache
 os.environ['HF_HOME'] = '/media/hdd/usr/martinelli/.cache/huggingface'
@@ -22,9 +31,9 @@ if not HF_TOKEN:
     raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
 
 def load_model_and_tokenizer():
-    """Load the Gemma-3-12B-IT model and processor with proper chat template support."""
+    """Load the gemma-3-4b-it model and processor with proper chat template support."""
     print("Loading model and processor...")
-    model_name = "google/gemma-3-12b-it"  # Large model
+    model_name = "google/gemma-3-4b-it"  # Large model
     # model_name = "google/gemma-2-2b-it"     # Smaller alternative for testing
     # Uncomment the line above and comment the large model if you encounter issues
     
@@ -69,47 +78,34 @@ def load_model_and_tokenizer():
             model_name,
             cache_dir=cache_dir,
             local_files_only=False,  # Allow download if not cached
-            resume_download=True,    # Resume interrupted downloads
-            token=HF_TOKEN          # Use your personal token
+            token=HF_TOKEN,          # Use your personal token
+            use_fast=True            # Use fast processor to avoid warnings
         )
         
         print("Loading model...")
         # Load model with optimizations for large models and cluster environment
         device_map = {"": gpu_id} if gpu_id is not None else "auto"
         
-        # Try bfloat16 first (preferred), fallback to float16 for older GPUs
-        try:
-            print("Attempting to load with bfloat16...")
-            model = Gemma3ForConditionalGeneration.from_pretrained(
-                model_name,
-                cache_dir=cache_dir,
-                torch_dtype=torch.bfloat16,  # Try bfloat16 first
-                device_map=device_map,      # Use selected GPU or auto-select
-                low_cpu_mem_usage=True,     # Reduce CPU memory usage during loading
-                trust_remote_code=True,     # Allow custom code if needed
-                local_files_only=False,     # Allow download if not cached
-                resume_download=True,       # Resume interrupted downloads
-                offload_folder=offload_folder,  # Offload to disk if needed
-                token=HF_TOKEN,             # Use your personal token
-                attn_implementation="eager"  # Use eager attention for compatibility
-            ).eval()  # Set to evaluation mode
-            print("✓ Successfully loaded model with bfloat16")
-        except Exception as e:
-            print(f"bfloat16 failed ({e}), trying float16...")
-            model = Gemma3ForConditionalGeneration.from_pretrained(
-                model_name,
-                cache_dir=cache_dir,
-                torch_dtype=torch.float16,  # Fallback to float16 for older GPU compatibility
-                device_map=device_map,      # Use selected GPU or auto-select
-                low_cpu_mem_usage=True,     # Reduce CPU memory usage during loading
-                trust_remote_code=True,     # Allow custom code if needed
-                local_files_only=False,     # Allow download if not cached
-                resume_download=True,       # Resume interrupted downloads
-                offload_folder=offload_folder,  # Offload to disk if needed
-                token=HF_TOKEN,             # Use your personal token
-                attn_implementation="eager"  # Use eager attention for compatibility
-            ).eval()  # Set to evaluation mode
-            print("✓ Successfully loaded model with float16")
+        # Use full precision to avoid quantization issues
+        print("Loading with full precision (float32)...")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            cache_dir=cache_dir,
+            torch_dtype=torch.float32,  # Use full precision
+            device_map=device_map,      # Use selected GPU or auto-select
+            low_cpu_mem_usage=True,     # Reduce CPU memory usage during loading
+            trust_remote_code=True,     # Allow custom code if needed
+            local_files_only=False,     # Allow download if not cached
+            offload_folder=offload_folder,  # Offload to disk if needed
+            token=HF_TOKEN,             # Use your personal token
+            attn_implementation="eager",  # Use eager attention for compatibility
+            max_memory={gpu_id: "20GB"} if gpu_id is not None else None,  # Adjust for float32
+            # Explicitly disable quantization
+            load_in_8bit=False,
+            load_in_4bit=False,
+            quantization_config=None
+        ).eval()  # Set to evaluation mode
+        print("✓ Successfully loaded model with full precision (float32)")
         
         # Verify model and processor compatibility
         print("Verifying model-processor compatibility...")
@@ -181,30 +177,19 @@ def load_model_and_tokenizer():
     return model, processor
 
 def load_concepts():
-    """Load concepts from concepts.json."""
-    with open('concepts.json', 'r') as f:
-        concepts = json.load(f)
-    
-    print(f"Loaded {len(concepts)} concepts")
-    return concepts
-
-def load_vocabulary():
-    """Load the Gemma 3 vocabulary from gemma3_vocabulary.json."""
-    with open('gemma3_vocabulary.json', 'r') as f:
-        data = json.load(f)
-    
-    # Handle the nested structure - vocabulary is under 'vocabulary' key
-    if 'vocabulary' in data:
-        vocab = data['vocabulary']
-        print(f"Loaded vocabulary with {len(vocab)} tokens")
-        if 'metadata' in data:
-            print(f"Model: {data['metadata'].get('model_name', 'Unknown')}")
-    else:
-        # Fallback if it's a flat structure
-        vocab = data
-        print(f"Loaded vocabulary with {len(vocab)} tokens")
-    
-    return vocab
+    """Load the list of concepts from test_concepts.json."""
+    print("Loading concepts from test_concepts.json...")
+    try:
+        with open('test_concepts.json', 'r', encoding='utf-8') as f:
+            concepts = json.load(f)
+        print(f"✅ Loaded {len(concepts)} test concepts")
+        return concepts
+    except FileNotFoundError:
+        print("❌ test_concepts.json not found")
+        return []
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing test_concepts.json: {e}")
+        return []
 
 def load_prompt_template():
     """Load the prompt template from keyword_generation_prompt.txt."""
@@ -212,34 +197,11 @@ def load_prompt_template():
         prompt_template = f.read()
     return prompt_template
 
-def create_full_prompt(concept_name, prompt_template, vocabulary):
-    """Create the full prompt including the concept name and vocabulary."""
-    # Replace the concept name placeholder
-    prompt = prompt_template.replace("{CONCEPT_NAME}", concept_name)
-    
-    # Add vocabulary information to the prompt
-    vocab_list = list(vocabulary.keys())[:1000]  # Use first 1000 tokens as example
-    vocab_sample = ", ".join(f'"{token}"' for token in vocab_list[:50])  # Show first 50 as sample
-    
-    vocabulary_section = f"""
-
-AVAILABLE VOCABULARY SAMPLE (first 50 of {len(vocabulary)} tokens):
-{vocab_sample}...
-
-IMPORTANT: Your response must ONLY contain tokens that exist in the provided Gemma vocabulary. 
-The vocabulary contains {len(vocabulary)} unique tokens. Make sure each of your 200 selected tokens 
-is present in this vocabulary.
-
-"""
-    
-    prompt += vocabulary_section
-    return prompt
-
 def test_model_generation(model, processor):
     """Test basic model generation to verify it's working correctly."""
     print("Testing basic generation...")
     try:
-        # Create test messages in the exact official format
+        # Create test messages following HuggingFace template
         test_messages = [
             {
                 "role": "user",
@@ -247,29 +209,23 @@ def test_model_generation(model, processor):
             }
         ]
         
-        # Use processor to apply chat template and tokenize
+        # Use processor following HuggingFace pattern
         test_input = processor.apply_chat_template(
             test_messages, 
             add_generation_prompt=True, 
             tokenize=True,
             return_dict=True, 
             return_tensors="pt"
-        ).to(model.device, dtype=next(model.parameters()).dtype)
+        ).to(model.device)
         
         input_len = test_input["input_ids"].shape[-1]
         print(f"Test input length: {input_len} tokens")
         
-        with torch.inference_mode():
-            generation = model.generate(
-                **test_input,
-                max_new_tokens=5,        # Reduced from 10 for cleaner output
-                do_sample=False,         # Use deterministic generation for test
-                pad_token_id=processor.tokenizer.eos_token_id
-            )
-            generation = generation[0][input_len:]
+        # Generate following HuggingFace pattern
+        outputs = model.generate(**test_input, max_new_tokens=5)
         
-        test_response = processor.decode(generation, skip_special_tokens=True).strip()
-        print(f"Generated {len(generation)} new tokens")
+        # Decode following HuggingFace pattern
+        test_response = processor.decode(outputs[0][test_input["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
         print(f"Basic generation test result: '{test_response}'")
         
         if test_response:
@@ -285,19 +241,15 @@ def test_model_generation(model, processor):
         traceback.print_exc()
         return False
 
-def generate_keywords_with_llm(model, processor, concept, prompt_template, vocabulary):
+def generate_keywords_with_llm(model, processor, concept, prompt_template):
     """Generate keywords for a concept using the LLM with proper chat template."""
     # Format the prompt with the concept - use the correct placeholder
     formatted_prompt = prompt_template.replace("{CONCEPT_NAME}", concept)
     
-    # Create messages in the EXACT format from the official Gemma3 template
+    # Create messages following HuggingFace template format
     messages = [
         {
-            "role": "system",
-            "content": [{"type": "text", "text": "You are a helpful AI assistant specialized in generating relevant keywords from a specific vocabulary for given concepts. Always provide exactly 10 keywords from the provided vocabulary that are most relevant to the concept."}]
-        },
-        {
-            "role": "user", 
+            "role": "user",
             "content": [
                 {"type": "text", "text": formatted_prompt}
             ]
@@ -305,81 +257,159 @@ def generate_keywords_with_llm(model, processor, concept, prompt_template, vocab
     ]
     
     try:
-        # Apply chat template and tokenize using processor - following exact template
+        # Apply chat template following HuggingFace pattern
         inputs = processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
-            return_tensors="pt"
-        ).to(model.device, dtype=next(model.parameters()).dtype)
+            return_tensors="pt",
+        ).to(model.device)
         
         input_len = inputs["input_ids"].shape[-1]
         print(f"    ① Input length for '{concept}': {input_len} tokens")
         
-        # Generate response using the same pattern as the template
-        with torch.inference_mode():
-            generation = model.generate(
-                **inputs,
-                max_new_tokens=1024,      # Reduced from 2048 to save memory
-                do_sample=True,
-                temperature=0.7,         # Some creativity but focused
-                repetition_penalty=1.05
-            )
-            generation = generation[0][input_len:]
+        # Clear GPU cache before generation to free up memory
+        torch.cuda.empty_cache()
         
-        # Decode the new tokens (response)
-        response = processor.decode(generation, skip_special_tokens=True).strip()
+        # Generate response with memory-efficient settings
+        with torch.no_grad():  # Disable gradient computation to save memory
+            outputs = model.generate(
+                **inputs, 
+                max_new_tokens=128,  # Much smaller - keywords don't need long responses
+                do_sample=True,      # Enable sampling for efficiency
+                temperature=0.7,     # Add some randomness
+                pad_token_id=processor.tokenizer.eos_token_id,  # Set pad token
+                use_cache=True,      # Enable KV cache for efficiency
+                cache_implementation="static"  # Use static cache to prevent memory growth
+            )
+        
+        # Clear cache again after generation
+        torch.cuda.empty_cache()
+        
+        # Decode only the new tokens (response) following HuggingFace pattern
+        response = processor.decode(outputs[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
         
         if not response:
             print(f"WARNING: Empty response for concept '{concept}'")
             return []
         
-        # Extract keywords from the response
-        keywords = extract_keywords_from_response(response, vocabulary)
+        # Extract keywords and description from the response
+        result = extract_keywords_from_response(response)
         
-        return keywords
+        return result
+        
+    except torch.cuda.OutOfMemoryError as e:
+        print(f"CUDA OOM Error for concept '{concept}': {e}")
+        # Clear cache and try with even smaller settings
+        torch.cuda.empty_cache()
+        
+        try:
+            print(f"    Retrying with reduced settings...")
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs, 
+                    max_new_tokens=64,   # Very small for retry
+                    do_sample=False,     # Greedy decoding for efficiency
+                    pad_token_id=processor.tokenizer.eos_token_id,
+                    use_cache=False      # Disable cache to save memory
+                )
+            
+            torch.cuda.empty_cache()
+            response = processor.decode(outputs[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
+            
+            if response:
+                return extract_keywords_from_response(response)
+            else:
+                print(f"    Retry failed: Empty response for '{concept}'")
+                return {"description": "", "keywords": []}
+                
+        except Exception as retry_e:
+            print(f"    Retry also failed: {retry_e}")
+            torch.cuda.empty_cache()
+            return {"description": "", "keywords": []}
         
     except Exception as e:
         print(f"Error generating keywords for concept '{concept}': {e}")
         print(f"Error type: {type(e).__name__}")
         import traceback
         traceback.print_exc()
-        return []
+        torch.cuda.empty_cache()  # Clear cache on any error
+        return {"description": "", "keywords": []}
 
-def extract_keywords_from_response(response, vocabulary):
-    """Extract keywords from the LLM response."""
+def extract_keywords_from_response(response):
+    """Extract keywords and description from the LLM response."""
     # This function should be consistent with parse_keywords_from_response
-    return parse_keywords_from_response(response, vocabulary)
+    return parse_keywords_from_response(response)
 
-def parse_keywords_from_response(response_text, vocabulary):
-    """Parse keywords from the LLM response."""
+def parse_keywords_from_response(response_text):
+    """Parse keywords and description from the LLM response with new format."""
     
     # Remove markdown code blocks if present
     cleaned_text = response_text.replace('```json', '').replace('```', '').strip()
     
-    # Try to parse as proper JSON first
+    # Initialize results
+    concept_description = ""
+    keywords = []
+    
     try:
-        # Look for the JSON structure: "concept": [...keywords...]
-        json_match = re.search(r'"[^"]+"\s*:\s*\[(.*?)\]', cleaned_text, re.DOTALL)
-        if json_match:
-            content = json_match.group(1)
+        # Look for CONCEPT DESCRIPTION: line
+        desc_match = re.search(r'CONCEPT DESCRIPTION:\s*(.+?)(?=\n|KEYWORDS:)', cleaned_text, re.DOTALL)
+        if desc_match:
+            concept_description = desc_match.group(1).strip()
+            print(f"    📝 Description: {concept_description[:100]}...")
+        
+        # Look for KEYWORDS: [...] section
+        keywords_match = re.search(r'KEYWORDS:\s*\[(.*?)\]', cleaned_text, re.DOTALL)
+        if keywords_match:
+            content = keywords_match.group(1)
             
             # Parse the actual JSON array content
             try:
                 # Try to parse as proper JSON array
                 json_array_text = '[' + content + ']'
-                keywords = json.loads(json_array_text)
+                raw_keywords = json.loads(json_array_text)
+                
+                # Filter out long sentences and keep only actual keywords
+                keywords = []
+                for item in raw_keywords:
+                    # Skip if it's a long sentence (more than 3 words or contains "CONCEPT DESCRIPTION")
+                    if (len(item.split()) <= 3 and 
+                        "CONCEPT DESCRIPTION" not in item and
+                        not item.startswith("following the") and
+                        not item.startswith("and themes") and
+                        len(item) < 50):  # Skip very long strings
+                        keywords.append(item.strip())
+                
             except json.JSONDecodeError:
                 # Fallback: split by comma and clean up
-                keywords = [token.strip(' "\'') for token in content.split(',')]
-                keywords = [kw.strip() for kw in keywords if kw.strip()]
+                raw_keywords = [token.strip(' "\'') for token in content.split(',')]
+                keywords = []
+                for item in raw_keywords:
+                    if (item.strip() and 
+                        len(item.split()) <= 3 and 
+                        "CONCEPT DESCRIPTION" not in item and
+                        len(item.strip()) < 50):
+                        keywords.append(item.strip())
         else:
-            keywords = extract_keywords_fallback(cleaned_text)
+            # Fallback to old format parsing
+            json_match = re.search(r'"[^"]+"\s*:\s*\[(.*?)\]', cleaned_text, re.DOTALL)
+            if json_match:
+                content = json_match.group(1)
+                try:
+                    json_array_text = '[' + content + ']'
+                    raw_keywords = json.loads(json_array_text)
+                    keywords = [kw for kw in raw_keywords if isinstance(kw, str) and len(kw.split()) <= 3 and len(kw) < 50]
+                except json.JSONDecodeError:
+                    raw_keywords = [token.strip(' "\'') for token in content.split(',')]
+                    keywords = [kw.strip() for kw in raw_keywords if kw.strip() and len(kw.split()) <= 3 and len(kw) < 50]
+            else:
+                keywords = extract_keywords_fallback(cleaned_text)
     except Exception as e:
+        print(f"    ⚠️ Parsing error: {e}")
         keywords = extract_keywords_fallback(cleaned_text)
     
-    # Remove duplicates while preserving order (no vocabulary validation)
+    # Remove duplicates while preserving order
     seen = set()
     unique_keywords = []
     duplicates_found = 0
@@ -397,7 +427,10 @@ def parse_keywords_from_response(response_text, vocabulary):
     print(f"    ② Final: {len(unique_keywords)} keywords (duplicates removed: {duplicates_found})")
     print(f"    ③ Sample: {sample_keywords}")
     
-    return unique_keywords
+    return {
+        "description": concept_description,
+        "keywords": unique_keywords
+    }
 
 def extract_keywords_fallback(text):
     """Fallback method to extract keywords from free text."""
@@ -410,85 +443,131 @@ def extract_keywords_fallback(text):
             keywords.extend([t for t in tokens if t and len(t) > 1])
     return keywords
 
-def find_last_checkpoint():
-    """Find the last saved checkpoint to resume from."""
-    import glob
+
+
+def tokenize_concepts_and_keywords(results, model_name="google/gemma-3-1b-it"):
+    """Tokenize concept descriptions and keywords using Gemma tokenizer."""
+    from transformers import AutoTokenizer
     
-    # Look for intermediate files
-    checkpoint_files = glob.glob('intermediate_keywords_*.json')
-    if not checkpoint_files:
-        print("No checkpoint files found - starting from beginning")
-        return {}, 0
-    
-    # Extract numbers and find the highest
-    checkpoint_numbers = []
-    for file in checkpoint_files:
-        try:
-            # Extract number from filename like 'intermediate_keywords_70.json'
-            number = int(file.split('_')[-1].split('.')[0])
-            checkpoint_numbers.append(number)
-        except:
-            continue
-    
-    if not checkpoint_numbers:
-        print("No valid checkpoint files found - starting from beginning")
-        return {}, 0
-    
-    last_checkpoint = max(checkpoint_numbers)
-    checkpoint_file = f'intermediate_keywords_{last_checkpoint}.json'
-    
-    print(f"Found checkpoint: {checkpoint_file}")
+    print(f"\n🔤 Tokenizing descriptions and keywords with {model_name}...")
     
     try:
-        with open(checkpoint_file, 'r') as f:
-            results = json.load(f)
-        print(f"Loaded {len(results)} completed concepts from checkpoint")
-        print(f"Resuming from concept {last_checkpoint + 1}")
-        return results, last_checkpoint
+        tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
+        
+        tokenized_results = {}
+        
+        for concept, data in results.items():
+            print(f"  Tokenizing: {concept}")
+            
+            if isinstance(data, dict) and 'description' in data and 'keywords' in data:
+                description = data['description']
+                keywords = data['keywords']
+            else:
+                # Fallback for old format
+                description = f"Concept related to {concept}"
+                keywords = data if isinstance(data, list) else []
+            
+            # Tokenize description
+            desc_tokens = tokenizer.encode(description, add_special_tokens=False)
+            
+            # Tokenize each keyword
+            keyword_tokens = {}
+            for keyword in keywords:
+                kw_tokens = tokenizer.encode(keyword, add_special_tokens=False)
+                keyword_tokens[keyword] = kw_tokens
+            
+            tokenized_results[concept] = {
+                "description": description,
+                "description_tokens": desc_tokens,
+                "keywords": keywords,
+                "keyword_tokens": keyword_tokens,
+                "description_token_count": len(desc_tokens),
+                "keyword_count": len(keywords)
+            }
+        
+        print(f"✅ Tokenization complete for {len(tokenized_results)} concepts")
+        return tokenized_results
+        
     except Exception as e:
-        print(f"Error loading checkpoint {checkpoint_file}: {e}")
-        print("Starting from beginning")
-        return {}, 0
+        print(f"❌ Tokenization failed: {e}")
+        return results
 
 def main():
     """Main function to generate keywords for all concepts."""
     print("Starting keyword generation process...")
     
+    # Create output directory
+    output_dir = "token-results"
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"📁 Created output directory: {output_dir}")
+    
     # Load all required components
     model, processor = load_model_and_tokenizer()
     concepts = load_concepts()
-    vocabulary = load_vocabulary()
     prompt_template = load_prompt_template()
     
-    # Check for existing progress and resume if possible
-    results, start_index = find_last_checkpoint()
+    # Initialize results dictionary
+    results = {}
     
-    # Process each concept starting from where we left off
-    for i, concept in enumerate(concepts[start_index:], start=start_index):
+    # Process each concept
+    for i, concept in enumerate(concepts):
         print(f"\nProcessing concept {i+1}/{len(concepts)}: {concept}")
         
         try:
-            keywords = generate_keywords_with_llm(
-                model, processor, concept, prompt_template, vocabulary
+            concept_data = generate_keywords_with_llm(
+                model, processor, concept, prompt_template
             )
-            results[concept] = keywords
-            
-            # Save intermediate results periodically
-            if (i + 1) % 10 == 0:
-                with open(f'intermediate_keywords_{i+1}.json', 'w') as f:
-                    json.dump(results, f, indent=2)
-                print(f"Saved intermediate results after {i+1} concepts")
+            results[concept] = concept_data
                 
         except Exception as e:
             print(f"Error processing {concept}: {str(e)}")
-            results[concept] = []  # Empty list as fallback
+            results[concept] = {"description": "", "keywords": []}  # Empty structure as fallback
     
-    # Save final results
-    with open('generated_keywords.json', 'w') as f:
+    # Tokenize results
+    tokenized_results = tokenize_concepts_and_keywords(results)
+    
+    # Save results in multiple formats
+    print(f"\n💾 Saving results to {output_dir}/...")
+    
+    # 1. Save raw generated keywords (original format for compatibility)
+    keywords_only = {}
+    for concept, data in results.items():
+        if isinstance(data, dict) and 'keywords' in data:
+            keywords_only[concept] = data['keywords']
+        else:
+            keywords_only[concept] = data if isinstance(data, list) else []
+    
+    with open(os.path.join(output_dir, 'generated_keywords.json'), 'w') as f:
+        json.dump(keywords_only, f, indent=2)
+    
+    # 2. Save full data with descriptions
+    with open(os.path.join(output_dir, 'generated_keywords_with_descriptions.json'), 'w') as f:
         json.dump(results, f, indent=2)
     
-    print(f"\nCompleted! Generated keywords for {len(results)} concepts")
-    print("Results saved to 'generated_keywords.json'")
+    # 3. Save tokenized results
+    with open(os.path.join(output_dir, 'tokenized_keywords.json'), 'w') as f:
+        json.dump(tokenized_results, f, indent=2)
+    
+    # 4. Create summary
+    summary = {
+        "total_concepts": len(results),
+        "successful_generations": len([r for r in results.values() if r]),
+        "average_keywords_per_concept": sum(len(data.get('keywords', [])) if isinstance(data, dict) else len(data) if isinstance(data, list) else 0 for data in results.values()) / len(results),
+        "model_used": "google/gemma-3-4b-it",
+        "generation_date": "2025-09-06"
+    }
+    
+    with open(os.path.join(output_dir, 'generation_summary.json'), 'w') as f:
+        json.dump(summary, f, indent=2)
+    
+    print(f"\n✅ Completed! Generated keywords for {len(results)} concepts")
+    print("📁 Files created:")
+    print(f"  - {output_dir}/generated_keywords.json (keywords only, original format)")
+    print(f"  - {output_dir}/generated_keywords_with_descriptions.json (with concept descriptions)")
+    print(f"  - {output_dir}/tokenized_keywords.json (with token IDs)")
+    print(f"  - {output_dir}/generation_summary.json (statistics)")
+    
+    return tokenized_results
 
 if __name__ == "__main__":
     main()

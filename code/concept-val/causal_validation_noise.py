@@ -234,12 +234,16 @@ def main():
     
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,  # Use full precision
         device_map=args.device,
         trust_remote_code=True,
         token=os.environ.get("HF_TOKEN") or None,
+        # Explicitly disable quantization
+        load_in_8bit=False,
+        load_in_4bit=False,
+        quantization_config=None
     ).eval()
-    print(f"✅ Loaded on {model.device}")
+    print(f"✅ Loaded on {model.device} with full precision")
 
     # Load QA file and pick concepts: first is target, next five are unrelated
     concepts_qa = load_grouped_qa(args.qa_file)

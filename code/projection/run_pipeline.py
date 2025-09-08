@@ -4,18 +4,13 @@ Concept Vector Extraction Pipeline
 
 This script orchestrates the complete pipeline for extracting concept vectors from Gemma 3 1B:
 
-1. Extract candidate vectors from MLP layers (middle layers 6-20)
-2. Extract token embeddings for all concept-related vocabulary tokens  
+1. Extract candidate vectors from MLP layers
+2. Extract token embeddings for concept tokens  
 3. Analyze candidate vectors using concept-specific token activation scores
-4. Rank and select best-fitting vectors for each concept
-5. Generate analysis reports and final results
-
-Pipeline Overview:
-- Input: concept_keyword_ids.json (from keyword generation phase)
-- Output: Best concept vectors for each concept with detailed analysis
+4. Generate final results
 
 Usage:
-    python run_pipeline.py [--top-k 100] [--concepts "concept1,concept2"] [--skip-extraction]
+    python run_pipeline.py
 """
 
 import argparse
@@ -37,27 +32,33 @@ os.environ["HF_HOME"] = "/media/hdd/usr/martinelli/.cache/huggingface"
 from extract_candidate_vectors import GemmaCandidateVectorExtractor
 from extract_token_embeddings import GemmaTokenEmbeddingExtractor  
 from project_and_rank import ConceptVectorProjector
+from project_and_rank_gpu import ConceptVectorProjectorGPU
 
 class ConceptVectorPipeline:
     """Complete pipeline for concept vector extraction"""
     
-    def __init__(self, base_dir: str = "."):
+    def __init__(self, base_dir: str = ".", use_gpu: bool = False):
         """
         Initialize pipeline
         
         Args:
             base_dir: Base directory for all operations
+            use_gpu: Whether to use GPU acceleration for analysis
         """
         self.base_dir = base_dir
-        self.concept_file = "../token-gen/concept_keyword_ids.json"
+        self.use_gpu = use_gpu
+        self.concept_file = "../token-gen/test_concepts.json"
+        self.token_mapping_file = "../token-gen/token-results/concept_keyword_ids.json"
         
         # Output directories
         self.candidate_vectors_dir = "extracted_vectors"
         self.token_embeddings_dir = "token_embeddings"
-        self.analysis_results_dir = "value_vector_results"
+        self.analysis_results_dir = "value_vector_results_gpu" if use_gpu else "value_vector_results"
         self.final_results_dir = "final_concept_vectors"
         
         self.pipeline_start_time = None
+        
+        print(f"🚀 Pipeline initialized with {'GPU acceleration' if use_gpu else 'CPU processing'}")
     
     def check_prerequisites(self) -> bool:
         """Check if all prerequisite files exist"""
@@ -66,24 +67,12 @@ class ConceptVectorPipeline:
         # Check concept file
         if not os.path.exists(self.concept_file):
             print(f"❌ Concept file not found: {self.concept_file}")
-            print("Please run the keyword validation script first to generate concept_keyword_ids.json")
             return False
-        
-        # Load and validate concept file
-        try:
-            with open(self.concept_file, 'r', encoding='utf-8') as f:
-                concept_data = json.load(f)
             
-            print(f"✅ Found concept file with {len(concept_data)} concepts")
-            
-            # Show a few examples
-            sample_concepts = list(concept_data.keys())[:3]
-            for concept in sample_concepts:
-                num_tokens = len(concept_data[concept])
-                print(f"  📝 {concept}: {num_tokens} tokens")
-            
-        except Exception as e:
-            print(f"❌ Error loading concept file: {e}")
+        # Check token mapping file  
+        if not os.path.exists(self.token_mapping_file):
+            print(f"❌ Token mapping file not found: {self.token_mapping_file}")
+            print("💡 Run token generation scripts first to create concept_keyword_ids.json")
             return False
         
         print("✅ Prerequisites check passed")
@@ -129,7 +118,8 @@ class ConceptVectorPipeline:
         
         try:
             extractor = GemmaTokenEmbeddingExtractor()
-            file_info = extractor.extract_and_save(self.concept_file, self.token_embeddings_dir)
+            # Use the token mapping file that extract_token_embeddings expects
+            file_info = extractor.extract_and_save(self.token_mapping_file, self.token_embeddings_dir)
             
             print(f"✅ Step 2 completed successfully") 
             print(f"📁 Embeddings saved to: {self.token_embeddings_dir}")
@@ -142,11 +132,20 @@ class ConceptVectorPipeline:
     def step3_analyze_value_vectors(self, top_k: int = 100, concept_subset: Optional[List[str]] = None) -> bool:
         """Analyze candidate vectors using concept-specific token activation scores"""
         print("\n" + "="*60)
-        print("STEP 3: VALUE VECTOR ANALYSIS")
+        if self.use_gpu:
+            print("STEP 3: GPU-ACCELERATED VALUE VECTOR ANALYSIS")
+        else:
+            print("STEP 3: VALUE VECTOR ANALYSIS")
         print("="*60)
         
         try:
-            projector = ConceptVectorProjector(self.candidate_vectors_dir, self.token_embeddings_dir)
+            if self.use_gpu:
+                print("🚀 Using GPU acceleration...")
+                projector = ConceptVectorProjectorGPU(self.candidate_vectors_dir, self.token_embeddings_dir)
+            else:
+                print("🖥️  Using CPU processing...")
+                projector = ConceptVectorProjector(self.candidate_vectors_dir, self.token_embeddings_dir)
+                
             file_info = projector.run_analysis(top_k, concept_subset, self.analysis_results_dir)
             
             print(f"✅ Step 3 completed successfully")
@@ -166,8 +165,12 @@ class ConceptVectorPipeline:
         try:
             os.makedirs(self.final_results_dir, exist_ok=True)
             
-            # Load analysis results
-            results_file = os.path.join(self.analysis_results_dir, "projection_analysis_results.json")
+            # Load analysis results (different filename for GPU version)
+            if self.use_gpu:
+                results_file = os.path.join(self.analysis_results_dir, "projection_gpu_analysis_results.json")
+            else:
+                results_file = os.path.join(self.analysis_results_dir, "projection_analysis_results.json")
+                
             with open(results_file, 'r', encoding='utf-8') as f:
                 analysis_results = json.load(f)
             
@@ -180,11 +183,11 @@ class ConceptVectorPipeline:
             final_results = {
                 "metadata": {
                     "pipeline_version": "1.0",
-                    "generation_date": "2025-08-06",
+                    "generation_date": "2025-09-06",
                     "model_name": "google/gemma-3-1b-it",
-                    "extraction_method": "value_vector_analysis",
+                    "extraction_method": "value_vector_analysis_gpu" if self.use_gpu else "value_vector_analysis",
+                    "gpu_accelerated": self.use_gpu,
                     "total_concepts": len(analysis_results["concept_analyses"]),
-                    "candidate_extraction_layers": candidate_metadata["metadata"]["target_layers"],
                     "analysis_method": analysis_results["metadata"]
                 },
                 "concept_vectors": {},
@@ -206,7 +209,7 @@ class ConceptVectorPipeline:
                 
                 # Parse vector key to get layer and neuron info
                 vector_key = top_candidate["vector_key"]
-                layer_num = int(vector_key.split('_')[0][1:])  # Extract from "L13_N0001"
+                layer_num = int(vector_key.split('_')[0][1:])  # Extract from "L13_C0001"
                 neuron_num = int(vector_key.split('_')[1][1:])
                 
                 final_results["concept_vectors"][concept_name] = {
@@ -254,7 +257,8 @@ class ConceptVectorPipeline:
             f.write(f"Model: {metadata['model_name']}\n")
             f.write(f"Generation Date: {metadata['generation_date']}\n")
             f.write(f"Total Concepts: {metadata['total_concepts']}\n")
-            f.write(f"Extraction Layers: {metadata['candidate_extraction_layers']}\n\n")
+            f.write(f"GPU Accelerated: {metadata.get('gpu_accelerated', False)}\n")
+            f.write(f"Extraction Method: {metadata['extraction_method']}\n\n")
             
             # Global statistics
             if "global_analysis" in final_results and final_results["global_analysis"]:
@@ -312,6 +316,7 @@ class ConceptVectorPipeline:
         print("=" * 60)
         print(f"📊 Target: Extract concept vectors for Gemma 3 1B")
         print(f"🎯 Top-k candidates per concept: {top_k}")
+        print(f"⚡ Processing mode: {'GPU-accelerated' if self.use_gpu else 'CPU'}")
         if concept_subset:
             print(f"🔍 Analyzing subset: {len(concept_subset)} concepts")
         print("")
@@ -358,6 +363,8 @@ def main():
                        help="Force re-extraction even if files exist")
     parser.add_argument("--base-dir", type=str, default=".",
                        help="Base directory for pipeline operations (default: current directory)")
+    parser.add_argument("--gpu", action="store_true",
+                       help="Use GPU acceleration for value vector analysis (requires CUDA)")
     
     args = parser.parse_args()
     
@@ -368,7 +375,7 @@ def main():
         print(f"🎯 Will analyze specific concepts: {concept_subset}")
     
     # Create and run pipeline
-    pipeline = ConceptVectorPipeline(args.base_dir)
+    pipeline = ConceptVectorPipeline(args.base_dir, use_gpu=args.gpu)
     
     success = pipeline.run_complete_pipeline(
         top_k=args.top_k,

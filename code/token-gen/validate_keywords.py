@@ -46,16 +46,76 @@ def load_vocabulary():
     
     return vocab
 
+def get_stopwords():
+    """Return a comprehensive list of stopwords to filter out from descriptions."""
+    stopwords = {
+        # Articles
+        'a', 'an', 'the',
+        # Conjunctions
+        'and', 'or', 'but', 'so', 'yet', 'for', 'nor',
+        # Prepositions
+        'in', 'on', 'at', 'by', 'to', 'of', 'with', 'from', 'into', 'onto', 'upon',
+        'through', 'over', 'under', 'above', 'below', 'between', 'among', 'within',
+        'without', 'during', 'before', 'after', 'since', 'until', 'while', 'across',
+        'around', 'behind', 'beside', 'beyond', 'inside', 'outside', 'toward', 'towards',
+        # Pronouns
+        'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
+        'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs',
+        'this', 'that', 'these', 'those', 'who', 'whom', 'whose', 'which', 'what',
+        # Auxiliary verbs
+        'is', 'am', 'are', 'was', 'were', 'be', 'being', 'been', 'have', 'has', 'had',
+        'do', 'does', 'did', 'will', 'would', 'shall', 'should', 'may', 'might', 'can', 
+        'could', 'must', 'ought',
+        # Common verbs
+        'get', 'got', 'getting', 'gets', 'make', 'made', 'making', 'makes', 'take', 'took',
+        'taking', 'takes', 'come', 'came', 'coming', 'comes', 'go', 'went', 'going', 'goes',
+        # Adverbs
+        'very', 'quite', 'rather', 'too', 'so', 'more', 'most', 'much', 'many', 'little',
+        'few', 'less', 'least', 'all', 'some', 'any', 'no', 'not', 'only', 'just', 'even',
+        'also', 'still', 'already', 'yet', 'again', 'once', 'twice', 'here', 'there',
+        'where', 'when', 'how', 'why', 'now', 'then', 'today', 'tomorrow', 'yesterday',
+        # Other common words
+        'as', 'if', 'than', 'like', 'such', 'way', 'ways', 'time', 'times', 'place', 'places',
+        'thing', 'things', 'people', 'person', 'world', 'life', 'work', 'works', 'working',
+        'day', 'days', 'year', 'years', 'part', 'parts', 'use', 'used', 'using', 'uses',
+        'see', 'seen', 'saw', 'look', 'looks', 'looking', 'looked', 'find', 'found', 'finding',
+        'know', 'knew', 'known', 'knowing', 'think', 'thought', 'thinking', 'thinks',
+        'say', 'said', 'saying', 'says', 'tell', 'told', 'telling', 'tells', 'give', 'gave',
+        'given', 'giving', 'gives', 'show', 'showed', 'shown', 'showing', 'shows',
+        # Numbers (as words)
+        'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
+        'first', 'second', 'third', 'last', 'next', 'new', 'old', 'good', 'bad', 'great',
+        'small', 'large', 'big', 'little', 'long', 'short', 'high', 'low', 'right', 'left',
+        'same', 'different', 'other', 'another', 'each', 'every', 'both', 'either', 'neither',
+        # Common transitions and connectives
+        'however', 'therefore', 'moreover', 'furthermore', 'nevertheless', 'nonetheless',
+        'consequently', 'accordingly', 'thus', 'hence', 'indeed', 'certainly', 'particularly',
+        'especially', 'specifically', 'generally', 'typically', 'usually', 'often', 'sometimes',
+        'always', 'never', 'perhaps', 'maybe', 'probably', 'possibly', 'definitely',
+        # Academic/formal terms that are too generic
+        'refers', 'including', 'encompasses', 'involves', 'characterized', 'known', 'considered',
+        'described', 'defined', 'called', 'named', 'termed', 'various', 'different', 'multiple',
+        'several', 'numerous', 'important', 'significant', 'major', 'primary', 'main', 'key',
+        'basic', 'fundamental', 'essential', 'necessary', 'related', 'associated', 'connected'
+    }
+    return stopwords
+
 def load_generated_keywords():
-    """Load the generated keywords from generated_keywords.json."""
+    """Load the generated keywords from token-results/generated_keywords.json."""
     print("Loading generated keywords...")
     
-    if not os.path.exists('generated_keywords.json'):
-        print("ERROR: generated_keywords.json not found!")
-        print("Please run generate_keywords.py first to create the keywords file.")
-        return None
+    # Check in token-results folder first, then fallback to current directory
+    keywords_file = 'token-results/generated_keywords.json'
+    if not os.path.exists(keywords_file):
+        keywords_file = 'generated_keywords.json'
+        if not os.path.exists(keywords_file):
+            print("ERROR: generated_keywords.json not found!")
+            print("Please run generate_keywords.py first to create the keywords file.")
+            return None
     
-    with open('generated_keywords.json', 'r') as f:
+    print(f"Reading keywords from: {keywords_file}")
+    
+    with open(keywords_file, 'r') as f:
         keywords_data = json.load(f)
     
     print(f"Loaded keywords for {len(keywords_data)} concepts")
@@ -137,7 +197,60 @@ def validate_keywords(keywords_data, vocabulary):
         invalid_keywords = []
         concept_fuzzy_matches = []
         
-        for keyword in keywords:
+        # Load description and split into words to append to keywords
+        combined_keywords = list(keywords)  # Start with original keywords
+        
+        # Try to get description from generated_keywords_with_descriptions.json
+        desc_file = 'token-results/generated_keywords_with_descriptions.json'
+        if not os.path.exists(desc_file):
+            desc_file = 'generated_keywords_with_descriptions.json'
+        
+        if os.path.exists(desc_file):
+            try:
+                with open(desc_file, 'r') as f:
+                    desc_data = json.load(f)
+                
+                if concept in desc_data and 'description' in desc_data[concept]:
+                    description = desc_data[concept]['description']
+                    
+                    # Get stopwords for filtering
+                    stopwords = get_stopwords()
+                    
+                    # Split description into words and clean them
+                    # Remove punctuation and split
+                    clean_desc = description.replace(',', ' ').replace('.', ' ').replace('!', ' ').replace('?', ' ')
+                    clean_desc = clean_desc.replace(';', ' ').replace(':', ' ').replace('(', ' ').replace(')', ' ')
+                    clean_desc = clean_desc.replace('[', ' ').replace(']', ' ').replace('"', ' ').replace("'", ' ')
+                    
+                    desc_words = []
+                    for word in clean_desc.split():
+                        word = word.strip().lower()
+                        # Filter conditions:
+                        # 1. Word must be longer than 2 characters
+                        # 2. Word must not be in stopwords
+                        # 3. Word must be alphabetic (no numbers or special chars)
+                        # 4. Word must not be too short or too long
+                        if (len(word) > 2 and 
+                            len(word) < 20 and
+                            word not in stopwords and 
+                            word.isalpha()):
+                            desc_words.append(word)
+                    
+                    # Remove duplicates while preserving order
+                    seen = set()
+                    unique_desc_words = []
+                    for word in desc_words:
+                        if word not in seen:
+                            seen.add(word)
+                            unique_desc_words.append(word)
+                    
+                    # Append filtered description words to keywords
+                    combined_keywords.extend(unique_desc_words)
+                    print(f"    📝 Added {len(unique_desc_words)} filtered description words for '{concept}' (filtered out {len(desc_words) - len(unique_desc_words)} stopwords/duplicates)")
+            except Exception as e:
+                print(f"    ⚠️ Could not load description for '{concept}': {e}")
+        
+        for keyword in combined_keywords:
             # Find possible token variants
             token_variants = find_token_variants(keyword, vocab_dict)
             
@@ -173,14 +286,16 @@ def validate_keywords(keywords_data, vocabulary):
                 total_invalid += 1
         
         validation_results[concept] = {
-            'total_keywords': len(keywords),
+            'total_keywords': len(combined_keywords),
+            'original_keywords_count': len(keywords),
+            'description_words_count': len(combined_keywords) - len(keywords),
             'valid_tuples': valid_tuples,
             'invalid_keywords': invalid_keywords,
             'fuzzy_matches': concept_fuzzy_matches,
             'valid_count': len(valid_tuples),
             'invalid_count': len(invalid_keywords),
             'fuzzy_count': len(concept_fuzzy_matches),
-            'validity_percentage': (len(valid_tuples) / len(keywords) * 100) if keywords else 0
+            'validity_percentage': (len(valid_tuples) / len(combined_keywords) * 100) if combined_keywords else 0
         }
         
         # Show a small sample of valid tuples with token counts
@@ -196,7 +311,8 @@ def validate_keywords(keywords_data, vocabulary):
         
         total_token_mappings = sum(len(variants) for _, variants in valid_tuples)
         fuzzy_info = f" ({len(concept_fuzzy_matches)} fuzzy)" if concept_fuzzy_matches else ""
-        print(f"\n[{concept_num}/{total_concepts}] {concept}: {len(valid_tuples)}/{len(keywords)} valid{fuzzy_info} ({validation_results[concept]['validity_percentage']:.1f}%) - {total_token_mappings} total mappings")
+        desc_info = f" (+{len(combined_keywords) - len(keywords)} desc words)" if len(combined_keywords) > len(keywords) else ""
+        print(f"\n[{concept_num}/{total_concepts}] {concept}: {len(valid_tuples)}/{len(combined_keywords)} valid{fuzzy_info}{desc_info} ({validation_results[concept]['validity_percentage']:.1f}%) - {total_token_mappings} total mappings")
         print(f"  Sample: {', '.join(sample_display)}")
     
     return validation_results, total_valid, total_invalid, invalid_keywords_by_concept, all_invalid_keywords, fuzzy_matches
@@ -295,14 +411,19 @@ def print_invalid_keywords_analysis(all_invalid_keywords, invalid_keywords_by_co
 
 def save_cleaned_keywords(validation_results, output_filename='concept_keyword_ids.json'):
     """Save actual vocabulary token-ID tuples for each concept with all variants found."""
-    print(f"\nSaving concept token-ID tuples to {output_filename}...")
+    # Create output directory and use it for the filename
+    output_dir = "token-results"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, output_filename)
+    
+    print(f"\nSaving concept token-ID tuples to {output_path}...")
     
     concept_keyword_ids = {}
     total_original_keywords = 0
     total_token_mappings = 0
     
     for concept, results in validation_results.items():
-        # Extract actual vocabulary tokens found, not original keywords
+        # Extract actual vocabulary tokens found (now includes description words)
         vocab_token_tuples = []
         for keyword, variants in results['valid_tuples']:
             # variants is a list of (vocab_token, token_id) tuples
@@ -313,17 +434,18 @@ def save_cleaned_keywords(validation_results, output_filename='concept_keyword_i
         
         concept_keyword_ids[concept] = vocab_token_tuples
     
-    with open(output_filename, 'w') as f:
+    with open(output_path, 'w') as f:
         json.dump(concept_keyword_ids, f, indent=2, ensure_ascii=False)
     
-    print(f"Saved {total_original_keywords} original keywords -> {total_token_mappings} vocabulary tokens across {len(concept_keyword_ids)} concepts")
-    print(f"Average {total_token_mappings/total_original_keywords:.2f} vocabulary token variants per original keyword")
+    print(f"Saved {total_original_keywords} words (keywords + description) -> {total_token_mappings} vocabulary tokens across {len(concept_keyword_ids)} concepts")
+    print(f"Average {total_token_mappings/total_original_keywords:.2f} vocabulary token variants per word")
     
     # Also save a human-readable summary
     summary_filename = output_filename.replace('.json', '_summary.txt')
-    with open(summary_filename, 'w') as f:
-        f.write("CONCEPT VOCABULARY TOKEN-ID MAPPING SUMMARY (ALL VARIANTS)\n")
-        f.write("=" * 60 + "\n\n")
+    summary_path = os.path.join(output_dir, summary_filename)
+    with open(summary_path, 'w') as f:
+        f.write("CONCEPT VOCABULARY TOKEN-ID MAPPING SUMMARY (KEYWORDS + DESCRIPTIONS)\n")
+        f.write("=" * 70 + "\n\n")
         
         for concept, tuples in concept_keyword_ids.items():
             # Group by vocabulary token (since we now store vocab tokens, not original keywords)
@@ -331,14 +453,18 @@ def save_cleaned_keywords(validation_results, output_filename='concept_keyword_i
             for vocab_token, token_id in tuples:
                 token_groups[vocab_token].append(token_id)
             
+            results = validation_results[concept]
+            
             f.write(f"Concept: {concept}\n")
             f.write(f"Total vocabulary tokens found: {len(token_groups)}\n")
             f.write(f"Total token mappings: {len(tuples)}\n")
+            f.write(f"Original keywords: {results.get('original_keywords_count', 0)}\n")
+            f.write(f"Description words: {results.get('description_words_count', 0)}\n")
             
             # Show original keywords that led to fuzzy matches for this concept
-            fuzzy_matches = validation_results[concept].get('fuzzy_matches', [])
+            fuzzy_matches = results.get('fuzzy_matches', [])
             if fuzzy_matches:
-                f.write(f"Original keywords with fuzzy matches: {len(fuzzy_matches)}\n")
+                f.write(f"Fuzzy matches: {len(fuzzy_matches)}\n")
                 f.write("Fuzzy match examples (original -> vocabulary tokens):\n")
                 for match in fuzzy_matches[:5]:  # Show first 5 fuzzy matches
                     tokens_str = ', '.join([f"'{token}'" for token in match['matched_tokens']])
@@ -353,13 +479,17 @@ def save_cleaned_keywords(validation_results, output_filename='concept_keyword_i
                     f.write(f"  '{vocab_token}' -> IDs: {token_ids} (appears {len(token_ids)} times)\n")
             f.write("\n" + "-" * 50 + "\n\n")
     
-    print(f"Also saved human-readable summary to {summary_filename}")
+    print(f"Also saved human-readable summary to {summary_path}")
     return concept_keyword_ids
 
 def save_validation_report(validation_results, invalid_keywords_by_concept, 
                           total_valid, total_invalid, output_filename='validation_report.json'):
     """Save detailed validation report as JSON."""
-    print(f"Saving detailed validation report to {output_filename}...")
+    output_dir = "token-results"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, output_filename)
+    
+    print(f"Saving detailed validation report to {output_path}...")
     
     report = {
         'summary': {
@@ -373,7 +503,7 @@ def save_validation_report(validation_results, invalid_keywords_by_concept,
         'invalid_keywords_by_concept': dict(invalid_keywords_by_concept)
     }
     
-    with open(output_filename, 'w') as f:
+    with open(output_path, 'w') as f:
         json.dump(report, f, indent=2)
 
 def main():
@@ -406,7 +536,7 @@ def main():
     print("\n" + "="*80)
     print("VALIDATION COMPLETE")
     print("="*80)
-    print("Files created:")
+    print("Files created in token-results/:")
     print("  - concept_keyword_ids.json: (vocabulary_token, token_id) tuples for each concept")
     print("  - concept_keyword_ids_summary.txt: Human-readable summary")
     print("  - validation_report.json: Detailed validation analysis")

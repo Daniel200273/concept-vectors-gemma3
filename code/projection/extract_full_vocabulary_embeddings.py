@@ -53,12 +53,16 @@ class FullVocabularyEmbeddingExtractor:
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         
-        # Load model
+        # Load model with full precision
         self.model = AutoModel.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,  # Use full precision
             device_map=self.device,
-            trust_remote_code=True
+            trust_remote_code=True,
+            # Explicitly disable quantization
+            load_in_8bit=False,
+            load_in_4bit=False,
+            quantization_config=None
         )
         
         # Extract embedding layer

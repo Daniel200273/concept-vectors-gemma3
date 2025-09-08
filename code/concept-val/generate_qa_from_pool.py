@@ -95,8 +95,9 @@ def generate_answer(tokenizer, model, prompt: str, max_new_tokens: int = 200, de
 
 def main(in_path: str = DEFAULT_INPUT, out_path: str = DEFAULT_OUTPUT):
     print(f"🔄 Loading model: {MODEL_ID}")
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    # Use full precision to avoid quantization
+    dtype = torch.float32
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=os.environ.get("HF_TOKEN") or None)
     model = AutoModelForCausalLM.from_pretrained(
@@ -104,8 +105,12 @@ def main(in_path: str = DEFAULT_INPUT, out_path: str = DEFAULT_OUTPUT):
         torch_dtype=dtype,
         trust_remote_code=True,
         token=os.environ.get("HF_TOKEN") or None,
+        # Explicitly disable quantization
+        load_in_8bit=False,
+        load_in_4bit=False,
+        quantization_config=None
     ).to(device).eval()
-    print(f"✅ Loaded on {device}")
+    print(f"✅ Loaded on {device} with full precision ({dtype})")
 
     pool = load_pool(in_path)
 

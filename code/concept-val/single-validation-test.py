@@ -67,28 +67,80 @@ class ConceptVectorValidator:
             token=os.environ["HF_TOKEN"]
         )
         
-        # Load model for text generation
+        # Load model for text generation with full precision
         print("Loading model...")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,  # Use full precision
             device_map=self.device,
             trust_remote_code=True,
-            token=os.environ["HF_TOKEN"]
+            token=os.environ["HF_TOKEN"],
+            # Explicitly disable quantization
+            load_in_8bit=False,
+            load_in_4bit=False,
+            quantization_config=None
         ).eval()
         
-        print(f"✅ Model loaded on {self.device}")
+        print(f"✅ Model loaded on {self.device} with full precision")
         print(f"📊 Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
     
     def load_concept_results(self, preferred_concept: Optional[str] = None):
         """Load projection results and select a concept to test."""
         print("📚 Loading concept vector analysis results...")
-        results_file = os.path.join(self.results_dir, "projection_analysis_results.json")
-        if not os.path.exists(results_file):
-            raise FileNotFoundError(f"Results file not found: {results_file}")
         
-        with open(results_file, 'r', encoding='utf-8') as f:
-            self.concept_results = json.load(f)
+        # Try final_concept_vectors.json first, then fall back to projection_analysis_results.json
+        final_results_file = os.path.join(self.results_dir, "final_concept_vectors.json")
+        analysis_results_file = os.path.join(self.results_dir, "projection_analysis_results.json")
+        
+        if os.path.exists(final_results_file):
+            print("📁 Loading from final_concept_vectors.json")
+            with open(final_results_file, 'r', encoding='utf-8') as f:
+                final_data = json.load(f)
+            
+            # Convert final format to analysis format for compatibility
+            self.concept_results = {
+                'metadata': final_data.get('metadata', {}),
+                'concept_analyses': {}
+            }
+            
+            for concept_name, concept_data in final_data.get('concept_vectors', {}).items():
+                # Convert best_candidate + alternative_candidates to top_candidates list
+                top_candidates = []
+                
+                # Add best candidate
+                best = concept_data.get('best_candidate', {})
+                if best:
+                    best_candidate = {
+                        'vector_key': best.get('vector_key'),
+                        'concept_activation_strength': best.get('concept_activation_strength'),
+                        'vector_index': 0,  # placeholder
+                        'scoring_info': best.get('concept_analysis', {})
+                    }
+                    top_candidates.append(best_candidate)
+                
+                # Add alternative candidates
+                alternatives = concept_data.get('alternative_candidates', [])
+                for alt in alternatives:
+                    alt_candidate = {
+                        'vector_key': alt.get('vector_key'),
+                        'concept_activation_strength': alt.get('concept_activation_strength'),
+                        'vector_index': alt.get('vector_index', 0),
+                        'scoring_info': alt.get('scoring_info', {})
+                    }
+                    top_candidates.append(alt_candidate)
+                
+                self.concept_results['concept_analyses'][concept_name] = {
+                    'top_candidates': top_candidates,
+                    'num_concept_tokens': concept_data.get('concept_info', {}).get('num_tokens', 0),
+                    'concept_tokens': concept_data.get('concept_info', {}).get('concept_tokens', [])
+                }
+                
+        elif os.path.exists(analysis_results_file):
+            print("📁 Loading from projection_analysis_results.json")
+            with open(analysis_results_file, 'r', encoding='utf-8') as f:
+                self.concept_results = json.load(f)
+        else:
+            raise FileNotFoundError(f"Neither final_concept_vectors.json nor projection_analysis_results.json found in {self.results_dir}")
         
         analyses = self.concept_results.get('concept_analyses', {})
         if not analyses:
@@ -321,7 +373,7 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(description="Single Concept Vector Validation Test")
     parser.add_argument("--device", type=str, default="cuda:1", help="Device or device_map for model (e.g., cuda:0, cuda:1, cpu)")
-    parser.add_argument("--results-dir", type=str, default="../projection/value_vector_results", help="Directory with projection_analysis_results.json")
+    parser.add_argument("--results-dir", type=str, default="../projection/final_concept_vectors/", help="Directory with final_concept_vectors.json or projection_analysis_results.json")
     parser.add_argument("--concept", type=str, default=None, help="Preferred concept name to test (optional)")
     parser.add_argument("--candidate-idx", type=int, default=0, help="Index of candidate in top_candidates (0-based)")
     parser.add_argument("--ablation-mode", type=str, default="zero", choices=["directional", "zero", "scale", "gaussian"], help="Intervention mode")

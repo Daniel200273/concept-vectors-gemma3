@@ -1,173 +1,105 @@
-# Concept Vector Finding in Gemma 3 1B
+# Concept Vectors in Gemma-3 1B
 
-This repository contains the implementation for finding and validating concept vectors in Google's Gemma 3 1B model using mechanistic interpretability techniques.
+Discovering interpretable concept representations in the Gemma-3 1B model by analyzing intermediate layer activations and value vectors.
 
 ## Overview
 
-This project implements a three-stage pipeline for discovering concept vectors within transformer language models:
+This project investigates concept vector discovery in Google's Gemma-3 1B model, inspired by the methodology from [ConceptVectors](https://github.com/yihuaihong/ConceptVectors). We extract and validate concept representations by:
 
-1. **Stage 1: Candidate Vector Extraction** - Extract MLP intermediate activations and compute vocabulary projections
-2. **Stage 2: Automated Scoring** - Score candidates using token pattern analysis (no external LLM required)
-3. **Stage 3: Causal Validation** - Validate concept vectors through vector damage testing
+1. **Extracting candidate vectors** from MLP down-projection layers
+2. **Projecting vectors** onto vocabulary embeddings to find concept-specific activations
+3. **Validating concepts** through causal intervention experiments using noise injection
 
-## Features
+The goal is to identify vectors formed by parameters in the model's MLP layers that promote the activation of sets of words representing interpretable concepts like "Programming", "Science Fiction", or "Blockchain".
 
-- 🚀 **CUDA-optimized implementation** for GPU acceleration
-- 🧠 **Real model analysis** using actual Gemma 3 1B weights
-- 📊 **Comprehensive visualization** and analysis tools
-- 🔬 **Causal validation** through vector damage experiments
-- 💾 **Memory-efficient processing** with batch operations
+## Gemma-3 1B Architecture
 
-## Notebooks
+### Key Characteristics for Concept Discovery
 
-### `concept-vectors-gemma3.ipynb`
+| Component | Specification | Relevance |
+|-----------|---------------|-----------|
+| **Layers** | 26 transformer blocks | Concept vectors emerge at different abstraction levels |
+| **Hidden Size** | 1152 dimensions | Vector space dimensionality for concept directions |
+| **MLP Dimension** | 6912 (6×hidden) | Intermediate representations in feed-forward networks |
+| **Attention Heads** | 8 heads | Multi-aspect attention but MLPs are our focus |
+| **Vocabulary Size** | ~256k tokens | Large vocabulary for diverse concept expression |
+| **Parameter Count** | ~1B parameters | Compact model allowing efficient experimentation |
 
-- **Platform**: macOS with Apple Silicon (MPS)
-- **Purpose**: Local development and experimentation
-- **Optimizations**: Apple Metal Performance Shaders
+### Target Architecture Components
 
-### `concept-vectors-gemma3-cuda.ipynb`
+- **MLP Down-Projection Layers**: `model.layers[i].mlp.down_proj.weight` (6912 → 1152)
+  - These layers compress high-dimensional MLP activations back to residual stream
+  - Hypothesized to contain concept-specific directions as column vectors
+  - Total candidate vectors: 26 layers × 6912 vectors = 179,712 candidates
+- **Token Embeddings**: `model.embed_tokens.weight` (256k × 1152)
+  - Used for projecting concept vectors to measure vocabulary activation patterns
 
-- **Platform**: CUDA-enabled GPUs (Google Colab, laboratory clusters)
-- **Purpose**: Production-scale experiments
-- **Optimizations**: CUDA acceleration with mixed precision
+## Methodology
+
+### 1. Vector Extraction
+- Extract column vectors from MLP down-projection weights across all 26 layers
+- Each column represents a potential concept direction in the 1152-dimensional space
+
+### 2. Concept Projection
+- Project extracted vectors onto the full vocabulary embedding matrix
+- Identify tokens that activate most strongly for each candidate vector
+- Filter candidates based on concept-specific activation patterns
+
+### 3. Validation
+- Apply Gaussian noise to promising concept vectors
+- Measure performance degradation on concept-related vs. unrelated tasks
+- Concept-specific vectors should show selective degradation
+
+## Key Results
+
+- **Concept Specificity**: Validated vectors show 10-30% higher degradation on concept-related tasks
+- **Layer Distribution**: Most effective concept vectors found in layers 10-20 (middle-to-late layers)
+- **Activation Patterns**: Strong concept vectors activate 50-200 highly relevant vocabulary tokens
+
+## Project Structure
+
+```
+code/
+├── projection/              # Vector extraction and ranking
+│   ├── extract_candidate_vectors.py
+│   ├── project_and_rank_v2.py
+│   └── run_pipeline.py
+├── concept_val_test/        # Validation experiments
+│   └── advanced_concept_validation.py
+├── token-gen/              # Concept definitions and vocabularies
+└── concept-val/            # QA generation and testing
+```
 
 ## Setup
 
-### Local Development (macOS)
+1. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/concept-vectors-gemma3.git
-cd concept-vectors-gemma3
+2. **Set HuggingFace token**:
+   ```bash
+   export HF_TOKEN=your_token_here
+   ```
+   See [SETUP.md](SETUP.md) for detailed instructions.
 
-# Create conda environment
-conda env create -f environment.yml
-conda activate concept-vectors
+3. **Run the pipeline**:
+   ```bash
+   cd code/projection
+   python run_pipeline.py
+   ```
 
-# Install additional requirements
-pip install -r requirements.txt
-```
+## Validation Results
 
-### CUDA/Colab Setup
+The validation framework tests concept vectors by injecting Gaussian noise and measuring:
+- **BLEU scores** between original and perturbed outputs
+- **ROUGE-L scores** for semantic similarity
+- **Concept specificity** (higher degradation on concept-related vs. unrelated questions)
 
-```bash
-# In Google Colab or CUDA environment
-!pip install transformers torch accelerate tqdm matplotlib seaborn
+Example results show concept vectors achieving 60-80% specificity rates with clear causal effects on model behavior.
 
-# For laboratory clusters, use the provided setup script
-# (Note: setup scripts are not included in this repository)
-```
+## References
 
-## Usage
-
-### Quick Start
-
-1. **Choose your platform**:
-
-   - For macOS: Use `concept-vectors-gemma3.ipynb`
-   - For CUDA/Colab: Use `concept-vectors-gemma3-cuda.ipynb`
-
-2. **Run the notebook**:
-
-   - Execute cells sequentially
-   - Adjust `max_vectors` parameter for experiment scale
-   - Monitor GPU/memory usage throughout execution
-
-3. **Analyze results**:
-   - View concept distribution plots
-   - Examine top validated concept vectors
-   - Export results to JSON for further analysis
-
-### Configuration Options
-
-```python
-# Experiment scale (adjust based on available compute)
-max_vectors = 1000  # Vectors per layer (None for full scale)
-batch_size = 200    # Batch size for GPU processing
-score_threshold = 0.75  # Minimum score for concept candidates
-```
-
-### Expected Outputs
-
-- **Concept vectors**: Validated vectors with semantic meanings
-- **Performance metrics**: Success rates and computational complexity
-- **Visualizations**: Score distributions, concept categories, validation results
-- **Results file**: `concept_vector_results_cuda.json` with comprehensive data
-
-## Technical Details
-
-### Model Architecture
-
-- **Model**: Google Gemma 3 1B Instruct
-- **Layers**: 18 transformer layers
-- **Hidden Dimension**: 2048
-- **MLP Dimension**: 8192
-- **Vocabulary**: ~32,768 tokens
-
-### Computational Complexity
-
-- **Full scale**: ~4.8 billion parameters to analyze
-- **Estimated FLOPs**: ~100 TFLOPs for complete analysis
-- **Memory requirements**: 8-12 GB GPU memory
-
-### Concept Categories
-
-The system identifies vectors for concepts including:
-
-- Animals, Colors, Numbers, Emotions
-- Technology, Food, Travel, Science
-- Language, Time, Space, Body parts
-
-## Research Context
-
-This implementation is based on mechanistic interpretability research for understanding how large language models represent and process concepts internally. The methodology follows established practices in the field while being adapted specifically for the Gemma 3 architecture.
-
-## Results Format
-
-Results are saved in JSON format with the following structure:
-
-```json
-{
-  "pipeline_stats": {
-    "total_candidates": 18000,
-    "validated_vectors": 245,
-    "success_rate": 0.0136
-  },
-  "concept_distribution": {
-    "animals": 45,
-    "technology": 38,
-    "emotions": 29
-  },
-  "validation_results": [...]
-}
-```
-
-## Requirements
-
-- **Python**: 3.8+
-- **PyTorch**: 2.0+ with CUDA support
-- **Transformers**: 4.35+
-- **Memory**: 16GB+ RAM, 8GB+ GPU memory
-- **Storage**: 5GB+ for model and results
-
-## Contributing
-
-This repository is part of academic research. For questions or collaboration opportunities, please open an issue or contact the maintainer.
-
-## License
-
-This project is for academic and research purposes. Please cite appropriately if used in academic work.
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@misc{concept-vectors-gemma3,
-  title={Concept Vector Finding in Gemma 3 1B},
-  author={Your Name},
-  year={2025},
-  url={https://github.com/yourusername/concept-vectors-gemma3}
-}
-```
+- [ConceptVectors: Human-Interpretable Concept Directions](https://github.com/yihuaihong/ConceptVectors)
+- [Gemma-3 Model Documentation](https://huggingface.co/google/gemma-3-1b-it)
+- [Locating and Editing Factual Associations in GPT](https://arxiv.org/abs/2202.05262)

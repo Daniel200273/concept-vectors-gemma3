@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
 """
-Concept Value Vector Analysis
+Concept Value Vector Analysis (Layers 14-22 Only)
 
 This script analyzes value vectors by computing concept-specific token activation scores.
+Only considers MLP layers 14-22 for more focused projection analysis.
 
 Process:
-1. Load candidate vectors (value vectors from MLP down_proj columns)
+1. Load candidate vectors (value vectors from MLP down_proj columns, layers 14-22)
 2. Load token embeddings (for concept tokens)
 3. For each concept, compute token activation scores using E_C @ vℓj
-4. Rank candidates by concept activation strength
-5. Select top-k candidates for each concept (ranking by mean of top-k token scores)
+4. Rank candidates by concept activation strength using ALL concept groups
+5. Select top-k candidates for each concept (ranking by mean of ALL token group scores)
 6. Save results with detailed analysis
 
 Mathematical approach:
 - For concept C with tokens T1, T2, ..., Tn (concept-specific tokens)
 - Concept token embeddings: E_C = [e1, e2, ..., en] (matrix of shape n_concept_tokens x d)
-- Candidate value vector: vℓj (shape d) - column from down_proj matrix
+- Candidate value vector: vℓj (shape d) - column from down_proj matrix (layers 14-22 only)
 - Compute concept token scores: rℓj = E_C @ vℓj (shape n_concept_tokens)
-- Measure concept alignment: mean of top-k scores in rℓj (k ≪ n) to focus on strongest matches
+- Measure concept alignment: mean of ALL group scores to use full concept representation
 """
 
 import numpy as np
 import json
 import os
 import re
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from tqdm import tqdm
 
 # Configure environment for HuggingFace
@@ -57,25 +58,61 @@ class ConceptVectorProjector:
         self.concept_mappings = None
     
     def load_candidate_vectors(self):
-        """Load candidate vectors from extraction results"""
-        print("📊 Loading candidate vectors...")
+        """Load candidate vectors from extraction results, filtering for layers 14-22 only"""
+        print("📊 Loading candidate vectors (layers 14-22 only)...")
         
         # Load NumPy array
         vectors_path = os.path.join(self.candidate_vectors_dir, "candidate_vectors.npy")
-        self.candidate_vectors = np.load(vectors_path)
+        if not os.path.exists(vectors_path):
+            raise FileNotFoundError(f"Candidate vectors file not found: {vectors_path}")
+        all_candidate_vectors = np.load(vectors_path)
         
         # Load metadata
         metadata_path = os.path.join(self.candidate_vectors_dir, "candidate_vectors_metadata.json")
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(f"Candidate vectors metadata not found: {metadata_path}")
         with open(metadata_path, 'r') as f:
             self.candidate_metadata = json.load(f)
         
         # Load index mapping
         mapping_path = os.path.join(self.candidate_vectors_dir, "vector_index_mapping.json")
+        if not os.path.exists(mapping_path):
+            raise FileNotFoundError(f"Vector index mapping not found: {mapping_path}")
         with open(mapping_path, 'r') as f:
-            self.vector_index_mapping = json.load(f)
+            all_vector_index_mapping = json.load(f)
         
-        print(f"✅ Loaded {self.candidate_vectors.shape[0]:,} candidate vectors")
+        # Filter for layers 14-22 only
+        target_layers = list(range(14, 23))  # 14 to 22 inclusive
+        filtered_indices = []
+        filtered_mapping = {}
+        
+        print(f"🎯 Filtering for layers: {target_layers}")
+        
+        for str_idx, vector_key in all_vector_index_mapping.items():
+            # Vector keys are formatted as "L{layer:02d}_C{col:04d}"
+            if vector_key.startswith('L'):
+                layer_str = vector_key[1:3]  # Extract layer number (2 digits)
+                try:
+                    layer_num = int(layer_str)
+                    if layer_num in target_layers:
+                        old_idx = int(str_idx)
+                        new_idx = len(filtered_indices)
+                        filtered_indices.append(old_idx)
+                        filtered_mapping[str(new_idx)] = vector_key
+                except ValueError:
+                    continue
+        
+        if not filtered_indices:
+            raise ValueError(f"No vectors found for target layers {target_layers}")
+        
+        # Extract the filtered vectors
+        self.candidate_vectors = all_candidate_vectors[filtered_indices]
+        self.vector_index_mapping = filtered_mapping
+        
+        print(f"✅ Loaded {len(filtered_indices):,} candidate vectors from layers 14-22")
         print(f"📏 Vector dimension: {self.candidate_vectors.shape[1]}")
+        print(f"🔍 Original total vectors: {all_candidate_vectors.shape[0]:,}")
+        print(f"🎯 Filtered vectors: {self.candidate_vectors.shape[0]:,}")
     
     def load_token_embeddings(self):
         """Load token embeddings from extraction results"""
@@ -83,10 +120,14 @@ class ConceptVectorProjector:
         
         # Load NumPy array
         embeddings_path = os.path.join(self.token_embeddings_dir, "token_embeddings.npy")
+        if not os.path.exists(embeddings_path):
+            raise FileNotFoundError(f"Token embeddings file not found: {embeddings_path}")
         self.token_embeddings = np.load(embeddings_path)
         
         # Load metadata and concept mappings
         metadata_path = os.path.join(self.token_embeddings_dir, "token_embeddings_metadata.json")
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(f"Token embeddings metadata not found: {metadata_path}")
         with open(metadata_path, 'r', encoding='utf-8') as f:
             self.token_metadata = json.load(f)
         
@@ -94,23 +135,98 @@ class ConceptVectorProjector:
         
         # Load ID mappings
         id_to_index_path = os.path.join(self.token_embeddings_dir, "token_id_to_index.json")
+        if not os.path.exists(id_to_index_path):
+            raise FileNotFoundError(f"Token ID to index mapping not found: {id_to_index_path}")
         with open(id_to_index_path, 'r') as f:
             self.token_id_to_index = {int(k): v for k, v in json.load(f).items()}
         
         id_to_string_path = os.path.join(self.token_embeddings_dir, "token_id_to_string.json")
+        if not os.path.exists(id_to_string_path):
+            raise FileNotFoundError(f"Token ID to string mapping not found: {id_to_string_path}")
         with open(id_to_string_path, 'r', encoding='utf-8') as f:
             self.token_id_to_string = {int(k): v for k, v in json.load(f).items()}
+        
+        # Load validation report for existing token groupings
+        validation_report_path = os.path.join("..", "token-gen", "token-results", "validation_report.json")
+        if os.path.exists(validation_report_path):
+            with open(validation_report_path, 'r', encoding='utf-8') as f:
+                self.validation_report = json.load(f)
+            print("✅ Loaded validation report with existing token groupings")
+        else:
+            print("⚠️ Validation report not found, will use basic grouping")
+            self.validation_report = None
         
         print(f"✅ Loaded {self.token_embeddings.shape[0]:,} token embeddings")
         print(f"📏 Embedding dimension: {self.token_embeddings.shape[1]}")
         print(f"🎯 Found {len(self.concept_mappings)} concepts")
+    
+    def get_concept_token_groups(self, concept_name: str) -> Dict:
+        """
+        Get token groups for a concept using existing validation report data
+        
+        Args:
+            concept_name: Name of the concept
+            
+        Returns:
+            Dictionary with grouped tokens and their indices
+        """
+        if self.validation_report and concept_name in self.validation_report.get("concept_details", {}):
+            # Use existing groupings from validation report
+            concept_details = self.validation_report["concept_details"][concept_name]
+            valid_tuples = concept_details.get("valid_tuples", [])
+            
+            token_groups = {}
+            for original_keyword, token_variants in valid_tuples:
+                # Group by original keyword (already grouped in validation)
+                group_name = original_keyword.lower()
+                
+                # Get indices for all token variants of this keyword
+                indices = []
+                for vocab_token, token_id in token_variants:
+                    if token_id in self.token_id_to_index:
+                        indices.append(self.token_id_to_index[token_id])
+                
+                if indices:
+                    token_groups[group_name] = {
+                        "indices": indices,
+                        "tokens": [vocab_token for vocab_token, token_id in token_variants],
+                        "original_keyword": original_keyword
+                    }
+            
+            return token_groups
+        else:
+            # Fallback: basic grouping by token string
+            if concept_name not in self.concept_mappings:
+                raise ValueError(f"Concept '{concept_name}' not found in concept mappings")
+                
+            concept_info = self.concept_mappings[concept_name]
+            concept_tokens = concept_info["tokens"]
+            
+            token_groups = {}
+            for token_info in concept_tokens:
+                token_id = token_info["token_id"]
+                token_string = token_info["token"]
+                
+                if token_id in self.token_id_to_index:
+                    group_name = token_string.lower()
+                    if group_name not in token_groups:
+                        token_groups[group_name] = {
+                            "indices": [],
+                            "tokens": [],
+                            "original_keyword": token_string
+                        }
+                    
+                    token_groups[group_name]["indices"].append(self.token_id_to_index[token_id])
+                    token_groups[group_name]["tokens"].append(token_string)
+            
+            return token_groups
     
     def compute_concept_token_scores(self, value_vector: np.ndarray, concept_embeddings: np.ndarray) -> Tuple[np.ndarray, Dict]:
         """
         Compute token scores for concept-specific tokens by multiplying concept embedding matrix with value vector
         
         Args:
-            value_vector: Value vector vℓj from down_proj matrix (shape: d)
+            value_vector: Value vector vℓj from down_proj matrix layers 14-22 (shape: d)
             concept_embeddings: Concept token embedding matrix E_C (shape: n_concept_tokens x d)
             
         Returns:
@@ -139,7 +255,7 @@ class ConceptVectorProjector:
         
         return concept_token_scores, scoring_info
 
-    # NEW: helper to normalize token strings into variant groups
+    # Helper method to normalize token strings into variant groups
     def _normalize_token_for_grouping(self, s: str) -> str:
         """Normalize a token string to a base form for grouping variants.
         - Lowercase
@@ -157,35 +273,41 @@ class ConceptVectorProjector:
         base = base.replace(' ', '')
         return base or s.lower().strip()
 
-    def analyze_concept_value_vectors(self, concept_name: str, top_k: int = 50, top_tokens_k: int = 100) -> Dict:
+    def analyze_concept_value_vectors(self, concept_name: str, top_k: int = 50) -> Dict:
         """
         Analyze value vectors for a single concept by computing token activation scores.
         Variant grouping enabled: tokens are grouped by normalized form; group score = max token score.
-        Ranking now uses ALL concept groups (since tokens are pre-selected to be concept-specific).
+        Uses ALL concept groups for ranking since tokens are pre-selected to be concept-specific.
         
         Args:
             concept_name: Name of the concept
             top_k: Number of top candidates to return
-            top_tokens_k: Number of top GROUP scores to compute for comparison (ranking uses all groups)
             
         Returns:
             Dictionary with value vector analysis results
         """
         print(f"🔍 Analyzing value vectors for concept: {concept_name}")
         
+        # Validate concept exists
+        if concept_name not in self.concept_mappings:
+            raise ValueError(f"Concept '{concept_name}' not found in concept mappings")
+        
         # Get concept token embeddings
         concept_info = self.concept_mappings[concept_name]
         token_ids = [token_info["token_id"] for token_info in concept_info["tokens"]]
         
         # Get embedding indices for concept tokens
-        concept_embedding_indices = [self.token_id_to_index[tid] for tid in token_ids]
+        concept_embedding_indices = [self.token_id_to_index[tid] for tid in token_ids if tid in self.token_id_to_index]
+        if not concept_embedding_indices:
+            raise ValueError(f"No valid token embeddings found for concept '{concept_name}'")
+            
         concept_embeddings = self.token_embeddings[concept_embedding_indices]  # Shape: (n_concept_tokens, dim)
         
         print(f"  📊 Concept has {len(token_ids)} tokens")
         print(f"  📏 Concept embedding matrix shape: {concept_embeddings.shape}")
         
         # Build variant groups once per concept
-        token_strs = [self.token_id_to_string[tid] for tid in token_ids]
+        token_strs = [self.token_id_to_string[tid] for tid in token_ids if tid in self.token_id_to_string]
         group_map: Dict[str, List[int]] = {}
         for idx, tok in enumerate(token_strs):
             key = self._normalize_token_for_grouping(tok)
@@ -229,12 +351,9 @@ class ConceptVectorProjector:
                 all_group_max = float(np.max(group_scores))
                 all_group_std = float(np.std(group_scores))
                 
-                # Also compute top-k subset for comparison/analysis
-                k = min(top_tokens_k, num_groups)
-                top_g_indices = np.argsort(group_scores)[-k:][::-1]
-                topk_group_scores = group_scores[top_g_indices]
-                topk_mean = float(np.mean(topk_group_scores))
-                topk_max = float(np.max(topk_group_scores))
+                # Use ALL token groups (no subset limitation)
+                # Since tokens are pre-selected to be concept-specific, use all groups
+                all_g_indices = np.argsort(group_scores)[::-1]  # All groups, sorted by score
                 
                 # Also keep full-token mean for reference
                 full_mean = scoring_info["scores_mean"]
@@ -260,8 +379,9 @@ class ConceptVectorProjector:
                 activation_spread = scoring_info["scores_std"]
                 concept_specificity = all_group_mean / max(activation_spread, 0.01)
                 
-                # Use mean of all concept groups as primary ranking metric
-                concept_activation_strength = concept_activation_strength_mean
+                # Use mean of all concept groups as primary ranking metric with selectivity bonus
+                selectivity_bonus = min(selectivity_ratio * 0.1, 1.0)  # Cap bonus at 1.0
+                concept_activation_strength = concept_activation_strength_mean + selectivity_bonus
                 
                 # Store result
                 result = {
@@ -270,17 +390,14 @@ class ConceptVectorProjector:
                     "concept_activation_strength": concept_activation_strength,
                     "selectivity_ratio": selectivity_ratio,
                     "concept_specificity": concept_specificity,
-                    "all_group_mean": all_group_mean,  # New: mean of all concept groups
-                    "all_group_max": all_group_max,    # New: max of all concept groups
-                    "all_group_std": all_group_std,    # New: std of all concept groups
-                    "topk_mean": topk_mean,            # Keep for comparison
-                    "topk_max": topk_max,              # Keep for comparison
+                    "all_group_mean": all_group_mean,  # Mean of all concept groups
+                    "all_group_max": all_group_max,    # Max of all concept groups
+                    "all_group_std": all_group_std,    # Std of all concept groups
                     "full_mean": full_mean,
-                    "top_tokens_k": k,  # interpreted as groups now
-                    "total_groups": num_groups,        # New: total number of concept groups
+                    "total_groups": num_groups,        # Total number of concept groups
                     "grouping": {"enabled": True, "method": "variant_max", "num_groups": num_groups},
                     "scoring_info": scoring_info,
-                    # For interpretability: top groups (up to 10) with their best token
+                    # For interpretability: all groups (up to 10 for display) with their best token
                     "top_groups": [
                         {
                             "group_key": group_keys[gidx],
@@ -290,9 +407,9 @@ class ConceptVectorProjector:
                             "token": self.token_id_to_string[token_ids[int(best_token_idx_per_group[gidx])]],
                             "score": float(group_scores[gidx])
                         }
-                        for gidx in top_g_indices[:min(10, len(top_g_indices))]
+                        for gidx in all_g_indices[:min(10, len(all_g_indices))]
                     ],
-                    # Back-compat: expose the same top items as tokens list (best token per top group)
+                    # Back-compat: expose the same top items as tokens list (best token per group, all groups)
                     "top_concept_tokens": [
                         {
                             "concept_token_index": int(best_token_idx_per_group[gidx]),
@@ -300,7 +417,7 @@ class ConceptVectorProjector:
                             "token": self.token_id_to_string[token_ids[int(best_token_idx_per_group[gidx])]],
                             "score": float(group_scores[gidx])
                         }
-                        for gidx in top_g_indices[:min(10, len(top_g_indices))]
+                        for gidx in all_g_indices[:min(10, len(all_g_indices))]
                     ]
                 }
                 
@@ -316,9 +433,7 @@ class ConceptVectorProjector:
         all_group_means = [r["all_group_mean"] for r in analysis_results]
         all_group_maxes = [r["all_group_max"] for r in analysis_results]
         all_group_stds = [r["all_group_std"] for r in analysis_results]
-        all_topk_means = [r["topk_mean"] for r in analysis_results]
         all_full_means = [r["full_mean"] for r in analysis_results]
-        all_topk_maxes = [r["topk_max"] for r in analysis_results]
         all_ranges = [r["scoring_info"]["scores_range"] for r in analysis_results]
         
         analysis_summary = {
@@ -330,20 +445,18 @@ class ConceptVectorProjector:
             ],
             "total_candidates_tested": len(analysis_results),
             "top_k": top_k,
-            "top_tokens_k": top_tokens_k,
             "grouping": {"enabled": True, "method": "variant_max", "num_groups": num_groups},
             "statistics": {
-                "max_activation_strength": float(np.max(all_group_means)),     # Now based on all concept groups
-                "mean_activation_strength": float(np.mean(all_group_means)),   # Now based on all concept groups
-                "median_activation_strength": float(np.median(all_group_means)), # Now based on all concept groups
-                "std_activation_strength": float(np.std(all_group_means)),     # Now based on all concept groups
+                "max_activation_strength": float(np.max(all_group_means)),     # Based on all concept groups
+                "mean_activation_strength": float(np.mean(all_group_means)),   # Based on all concept groups
+                "median_activation_strength": float(np.median(all_group_means)), # Based on all concept groups
+                "std_activation_strength": float(np.std(all_group_means)),     # Based on all concept groups
                 "max_concept_group_max": float(np.max(all_group_maxes)),       # Max across all concept groups
                 "mean_concept_group_std": float(np.mean(all_group_stds)),      # Mean std within concept groups
                 "max_concept_full_mean": float(np.max(all_full_means)),        # Keep for reference
-                "max_concept_topk_max": float(np.max(all_topk_maxes)),         # Keep for comparison
                 "mean_concept_score_range": float(np.mean(all_ranges)),
                 "top_k_activation_mean": float(np.mean([r["concept_activation_strength"] for r in top_results])),
-                "ranking_method": "all_concept_groups_mean"  # Document the ranking method used
+                "ranking_method": "all_concept_groups_mean_with_selectivity_bonus"  # Document the ranking method used
             },
             "top_candidates": top_results,
             "concept_embedding_info": {
@@ -355,34 +468,52 @@ class ConceptVectorProjector:
         
         return analysis_summary
     
-    def analyze_all_concepts(self, top_k: int = 50, concept_subset: Optional[List[str]] = None, top_tokens_k: int = 100) -> Dict:
+    def analyze_all_concepts(self, top_k: int = 50, concept_subset: List[str] = None) -> Dict:
         """
         Analyze value vectors for all concepts (grouped by variants)
-        Now uses ALL concept groups for ranking since tokens are pre-selected to be concept-specific.
+        Uses ALL concept groups for ranking since tokens are pre-selected to be concept-specific.
         
         Args:
             top_k: Number of top candidates per concept
             concept_subset: List of specific concepts to analyze (None = all)
-            top_tokens_k: Number of top group scores to compute for comparison (ranking uses all groups)
             
         Returns:
             Dictionary with all concept analyses
         """
-        print(f"🎯 Analyzing value vectors for all concepts (top-{top_k} candidates, using ALL concept groups for ranking)")
-        print("=" * 60)
+        print(f"🎯 Analyzing value vectors for all concepts (layers 14-22, top-{top_k} candidates, using ALL concept groups)")
+        print("=" * 80)
         
         # Determine which concepts to analyze
         concepts_to_analyze = concept_subset if concept_subset else list(self.concept_mappings.keys())
         
-        print(f"📊 Will analyze {len(concepts_to_analyze)} concepts")
+        # Validate that requested concepts exist in concept mappings
+        if concept_subset:
+            available_concepts = set(self.concept_mappings.keys())
+            missing_concepts = [c for c in concept_subset if c not in available_concepts]
+            if missing_concepts:
+                print(f"⚠️ Warning: The following concepts are not available in concept mappings:")
+                for missing in missing_concepts:
+                    print(f"    ❌ '{missing}'")
+                print(f"\n📋 Available concepts: {sorted(available_concepts)}")
+                
+                # Filter to only include available concepts
+                concepts_to_analyze = [c for c in concept_subset if c in available_concepts]
+                if not concepts_to_analyze:
+                    print(f"❌ No valid concepts found! Analysis cannot proceed.")
+                    return {}
+                print(f"✅ Proceeding with {len(concepts_to_analyze)} valid concepts")
+        
+        print(f"📊 Will analyze {len(concepts_to_analyze)} concepts:")
+        for i, concept in enumerate(concepts_to_analyze, 1):
+            print(f"    {i:2d}. {concept}")
         
         all_results = {
             "metadata": {
-                "analysis_date": "2025-08-06",
-                "method": "value_vector_token_scoring_all_groups",  # Updated method name
+                "analysis_date": "2025-09-06",
+                "method": "value_vector_token_scoring_all_groups_layers_14_22",
                 "top_k": top_k,
-                "top_tokens_k": top_tokens_k,
-                "ranking_method": "all_concept_groups_mean",  # Document ranking approach
+                "ranking_method": "all_concept_groups_mean",
+                "layer_range": "14-22",
                 "total_concepts": len(concepts_to_analyze),
                 "total_candidates": self.candidate_vectors.shape[0],
                 "embedding_dimension": self.candidate_vectors.shape[1]
@@ -395,16 +526,16 @@ class ConceptVectorProjector:
             print(f"\n[{i+1}/{len(concepts_to_analyze)}] Analyzing: {concept_name}")
             
             try:
-                concept_analysis = self.analyze_concept_value_vectors(concept_name, top_k, top_tokens_k)
+                concept_analysis = self.analyze_concept_value_vectors(concept_name, top_k)
                 all_results["concept_analyses"][concept_name] = concept_analysis
                 
                 # Show quick summary
                 max_activation = concept_analysis["statistics"]["max_activation_strength"]
                 mean_activation = concept_analysis["statistics"]["mean_activation_strength"]
-                max_topk = concept_analysis["statistics"]["max_concept_topk_max"]
+                max_group_score = concept_analysis["statistics"]["max_concept_group_max"]
                 print(f"  ✅ Max activation strength: {max_activation:.4f}")
                 print(f"  📊 Mean activation strength: {mean_activation:.4f}")
-                print(f"  🎯 Max top-k group score: {max_topk:.4f}")
+                print(f"  🎯 Max group score: {max_group_score:.4f}")
                 
             except Exception as e:
                 print(f"  ❌ Error analyzing {concept_name}: {str(e)}")
@@ -463,9 +594,8 @@ class ConceptVectorProjector:
                     concept: {
                         "max_activation_strength": analysis["statistics"]["max_activation_strength"],
                         "mean_activation_strength": analysis["statistics"]["mean_activation_strength"],
-                        "max_concept_score": analysis["statistics"]["max_concept_topk_max"],
+                        "max_concept_score": analysis["statistics"]["max_concept_group_max"],
                         "num_tokens": analysis["num_concept_tokens"],
-                        "top_tokens_k": analysis.get("top_tokens_k", results["metadata"].get("top_tokens_k")),
                         "top_candidate": analysis["top_candidates"][0] if analysis["top_candidates"] else None
                     }
                     for concept, analysis in results["concept_analyses"].items()
@@ -483,16 +613,15 @@ class ConceptVectorProjector:
         
         return {"results_path": results_path, "summary_path": summary_path}
     
-    def run_analysis(self, top_k: int = 50, concept_subset: Optional[List[str]] = None, 
-                    output_dir: str = ".", top_tokens_k: int = 100) -> Dict:
+    def run_analysis(self, top_k: int = 50, concept_subset: List[str] = None, 
+                    output_dir: str = ".") -> Dict:
         """
-        Complete value vector analysis pipeline
+        Complete value vector analysis pipeline using all concept groups (layers 14-22 only)
         
         Args:
             top_k: Number of top candidates per concept
             concept_subset: List of specific concepts (None = all)
             output_dir: Directory to save results
-            top_tokens_k: Number of top token scores to aggregate per concept
             
         Returns:
             Dictionary with file paths
@@ -505,14 +634,14 @@ class ConceptVectorProjector:
         self.load_token_embeddings()
         
         # Step 2: Run analysis
-        results = self.analyze_all_concepts(top_k, concept_subset, top_tokens_k)
+        results = self.analyze_all_concepts(top_k, concept_subset)
         
         # Step 3: Save results
         file_info = self.save_results(results, output_dir)
         
-        print("\n" + "=" * 60)
-        print("✅ VALUE VECTOR ANALYSIS COMPLETE!")
-        print("=" * 60)
+        print("\n" + "=" * 80)
+        print("✅ VALUE VECTOR ANALYSIS COMPLETE (LAYERS 14-22)!")
+        print("=" * 80)
         
         if "global_statistics" in results:
             stats = results["global_statistics"]
@@ -527,13 +656,12 @@ class ConceptVectorProjector:
 
 
 def main():
-    """Main value vector analysis function"""
+    """Main value vector analysis function - analyzes layers 14-22 only using test concepts"""
     # Configuration
     candidate_vectors_dir = "extracted_vectors"
     token_embeddings_dir = "token_embeddings"
-    output_dir = "value_vector_results"
-    top_k = 100
-    top_tokens_k = 100  # mean over top-100 concept token groups
+    output_dir = "value_vector_results_layers_14_22"
+    top_k = 100  # Top-k candidate vectors per concept
     
     # Check if required directories exist
     if not os.path.exists(candidate_vectors_dir):
@@ -549,14 +677,26 @@ def main():
     # Create analyzer  
     analyzer = ConceptVectorProjector(candidate_vectors_dir, token_embeddings_dir)
     
-    # Test with the 'Harry Potter' concept as requested
-    concept_subset = ["Harry Potter"]
+    # Load concepts from test_concepts.json
+    test_concepts_path = os.path.join("..", "token-gen", "test_concepts.json")
+    if os.path.exists(test_concepts_path):
+        with open(test_concepts_path, 'r', encoding='utf-8') as f:
+            concept_subset = json.load(f)
+        print(f"📋 Loaded {len(concept_subset)} concepts from test_concepts.json:")
+        for i, concept in enumerate(concept_subset, 1):
+            print(f"  {i:2d}. {concept}")
+    else:
+        print(f"⚠️ Test concepts file not found: {test_concepts_path}")
+        print("📋 Using default concept: Harry Potter")
+        concept_subset = ["Harry Potter"]
     
     # Run analysis
-    file_info = analyzer.run_analysis(top_k, concept_subset, output_dir, top_tokens_k)
+    file_info = analyzer.run_analysis(top_k, concept_subset, output_dir)
     
     print(f"\n🎉 Value vector analysis completed!")
     print(f"📁 Check the '{output_dir}' folder for results")
+    if concept_subset:
+        print(f"🎯 Analyzed concepts: {', '.join(concept_subset)}")
 
 if __name__ == "__main__":
     main()

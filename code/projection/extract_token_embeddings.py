@@ -57,12 +57,16 @@ class GemmaTokenEmbeddingExtractor:
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         
-        # Load model
+        # Load model with full precision
         self.model = AutoModel.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,  # Use full precision
             device_map=self.device,
-            trust_remote_code=True
+            trust_remote_code=True,
+            # Explicitly disable quantization
+            load_in_8bit=False,
+            load_in_4bit=False,
+            quantization_config=None
         )
         
         # Extract embedding layer
@@ -197,13 +201,7 @@ class GemmaTokenEmbeddingExtractor:
         
         os.makedirs(output_dir, exist_ok=True)
         
-        # 1. Save full database as JSON (large file!)
-        json_path = os.path.join(output_dir, "token_embeddings_full.json")
-        print(f"  Saving full database to {json_path}...")
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(embedding_db, f, indent=2, ensure_ascii=False)
-        
-        # 2. Save metadata and concept mappings only
+        # 1. Save metadata and concept mappings only (no need for full database)
         metadata_path = os.path.join(output_dir, "token_embeddings_metadata.json")
         metadata = {
             "metadata": embedding_db["metadata"],
@@ -212,8 +210,8 @@ class GemmaTokenEmbeddingExtractor:
         with open(metadata_path, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
         
-        # 3. Save embeddings as NumPy array for efficient computation
-        # Create ordered arrays
+        # 2. Save embeddings as NumPy array for efficient computation
+        # Use existing token IDs directly from the concept file
         token_ids = sorted([int(k) for k in embedding_db["embeddings"].keys()])
         embeddings_array = np.array([
             embedding_db["embeddings"][str(tid)]["embedding"] 
@@ -223,31 +221,30 @@ class GemmaTokenEmbeddingExtractor:
         numpy_path = os.path.join(output_dir, "token_embeddings.npy")
         np.save(numpy_path, embeddings_array)
         
-        # 4. Save token ID to array index mapping
-        id_mapping = {tid: i for i, tid in enumerate(token_ids)}
+        # 3. Save simple token ID to array index mapping (much smaller than before)
+        id_to_index = {tid: i for i, tid in enumerate(token_ids)}
         mapping_path = os.path.join(output_dir, "token_id_to_index.json")
         with open(mapping_path, 'w') as f:
-            json.dump(id_mapping, f, indent=2)
+            json.dump(id_to_index, f, indent=2)
         
-        # 5. Save token strings for reference
+        # 4. Save token strings for reference (reuse existing token strings from concept file)
         token_strings = {tid: embedding_db["embeddings"][str(tid)]["token"] for tid in token_ids}
         strings_path = os.path.join(output_dir, "token_id_to_string.json")
         with open(strings_path, 'w', encoding='utf-8') as f:
             json.dump(token_strings, f, indent=2, ensure_ascii=False)
         
-        print(f"✅ Saved token embeddings in multiple formats:")
-        print(f"    📄 Full database: {json_path}")
-        print(f"    📋 Metadata + mappings: {metadata_path}")
-        print(f"    🔢 NumPy array: {numpy_path} (shape: {embeddings_array.shape})")
-        print(f"    🗂️  ID to index: {mapping_path}")
-        print(f"    📝 ID to string: {strings_path}")
+        print(f"✅ Saved token embeddings in optimized formats:")
+        print(f"    📋 Metadata + concept mappings: {metadata_path}")
+        print(f"    🔢 NumPy embeddings: {numpy_path} (shape: {embeddings_array.shape})")
+        print(f"    🗂️  Token ID → array index: {mapping_path}")
+        print(f"    📝 Token ID → string: {strings_path}")
+        print(f"    💡 Note: Using existing token IDs from concept_keyword_ids.json")
         
         # File size info
         file_size_mb = os.path.getsize(numpy_path) / (1024 * 1024)
         print(f"    💾 Embedding array size: {file_size_mb:.1f} MB")
         
         return {
-            "json_path": json_path,
             "metadata_path": metadata_path,
             "numpy_path": numpy_path,
             "mapping_path": mapping_path,
@@ -297,8 +294,8 @@ class GemmaTokenEmbeddingExtractor:
 
 def main():
     """Main embedding extraction function"""
-    # Configuration
-    concept_file = "../token-gen/concept_keyword_ids.json"
+    # Configuration - updated path to token-results
+    concept_file = "../token-gen/token-results/concept_keyword_ids.json"
     output_dir = "token_embeddings"
     
     # Check if concept file exists

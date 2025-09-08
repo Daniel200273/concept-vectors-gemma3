@@ -79,13 +79,17 @@ class GemmaCandidateVectorExtractor:
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, token=HF_TOKEN)
         
-        # Load model
+        # Load model in FULL PRECISION to avoid quantization
         self.model = AutoModel.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,  # Use full 32-bit precision to avoid quantization
             device_map={"": int(self.device.split(':')[1])} if "cuda" in self.device else self.device,
             trust_remote_code=True,
-            token=HF_TOKEN
+            token=HF_TOKEN,
+            # Explicitly disable quantization
+            load_in_8bit=False,
+            load_in_4bit=False,
+            quantization_config=None
         )
         
         self.config = self.model.config
@@ -95,8 +99,19 @@ class GemmaCandidateVectorExtractor:
         assert self.config.hidden_size == self.hidden_size, f"Expected hidden size {self.hidden_size}, got {self.config.hidden_size}"
         assert self.config.intermediate_size == self.intermediate_size, f"Expected intermediate size {self.intermediate_size}, got {self.config.intermediate_size}"
         
-        print(f"✅ Model loaded successfully!")
+        print(f"✅ Model loaded successfully in FULL PRECISION!")
         print(f"📋 Verified architecture: {self.num_layers} layers, {self.hidden_size}d hidden, {self.intermediate_size}d intermediate")
+        print(f"🎯 Model dtype: {next(self.model.parameters()).dtype} (avoiding quantization)")
+        
+        # Verify we have full precision weights
+        sample_weight = self.model.layers[0].mlp.down_proj.weight.data
+        weight_range = sample_weight.max() - sample_weight.min()
+        unique_values = len(torch.unique(sample_weight))
+        print(f"🔍 Weight analysis - Range: {weight_range:.6f}, Unique values: {unique_values}")
+        if unique_values > 1000:
+            print(f"✅ Weights appear to be full precision (many unique values)")
+        else:
+            print(f"⚠️  Weights may be quantized (few unique values: {unique_values})")
     
     def extract_mlp_weights(self) -> Dict[int, torch.Tensor]:
         """
@@ -152,7 +167,10 @@ class GemmaCandidateVectorExtractor:
                 "intermediate_size": self.intermediate_size,
                 "total_candidates": self.total_candidates,
                 "vector_dimension": self.hidden_size,  # Each column has hidden_size dimensions
-                "extraction_method": "mlp_down_proj_weights"
+                "extraction_method": "mlp_down_proj_weights",
+                "precision": "float32_full_precision",  # Document precision used
+                "quantization_disabled": True,  # Explicitly disabled quantization
+                "model_dtype": "torch.float32"  # Model loaded in full precision
             },
             "vectors": {},
             "layer_info": {}
@@ -168,7 +186,13 @@ class GemmaCandidateVectorExtractor:
             # Extract each COLUMN as a candidate vector from down_proj matrix
             # Each column is a candidate vector vℓi
             for col_idx in range(self.intermediate_size):  # 6912 columns
-                vector = weight_matrix[:, col_idx].numpy().astype(np.float32)  # Extract column
+                # Keep full precision by avoiding unnecessary type conversions
+                vector = weight_matrix[:, col_idx].numpy()  # Already float32 from model
+                
+                # Verify we maintain full precision
+                if col_idx == 0 and layer_idx == self.target_layers[0]:  # First vector
+                    unique_vals = len(np.unique(vector))
+                    print(f"    📊 First vector analysis: {unique_vals} unique values, range: {vector.max()-vector.min():.6f}")
                 
                 # Create unique identifier
                 vector_key = f"L{layer_idx:02d}_C{col_idx:04d}"  # C for column
@@ -223,11 +247,15 @@ class GemmaCandidateVectorExtractor:
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        # 3. Save vectors as numpy arrays for efficient loading
+        # 3. Save vectors as numpy arrays for efficient loading (maintain full precision)
         vectors_array = np.array([
             candidate_db["vectors"][key]["vector"] 
             for key in sorted(candidate_db["vectors"].keys())
-        ], dtype=np.float32)
+        ], dtype=np.float32)  # Maintain float32 precision
+        
+        # Verify precision preservation
+        total_unique = len(np.unique(vectors_array))
+        print(f"  🔍 Final array analysis: {total_unique:,} unique values across all vectors")
         
         numpy_path = os.path.join(output_dir, "candidate_vectors.npy")
         np.save(numpy_path, vectors_array)
