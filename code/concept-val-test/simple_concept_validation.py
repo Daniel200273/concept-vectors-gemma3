@@ -10,7 +10,22 @@ import random
 import statistics
 import os
 from pathlib import Path
+
+# HuggingFace setup - force private cache locations so this script always uses
+# the user's private cache regardless of external environment variables.
+# This must be set before importing transformers/huggingface so the
+# libraries pick up the correct cache paths at import time.
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import logging as hf_logging
+import logging as py_logging
+import warnings
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
 import copy
@@ -24,28 +39,31 @@ from typing import List, Dict, Tuple, Any
 MODEL_ID = os.environ.get("GEMMA_MODEL", "google/gemma-3-1b-it")
 DEVICE = "cuda:1"
 
-# HuggingFace setup
-os.environ.setdefault("HF_HOME", "/media/hdd/usr/martinelli/.cache/huggingface")
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-if HF_TOKEN:
-    os.environ["HF_TOKEN"] = HF_TOKEN
-
 # Ablation Configuration
 ABLATION = True  # When True, ablate vectors; when False, add noise
-ABLATION_VALUE = -100.0  # Value to set ablated vectors to (should be far from normal range)
+# Value to set ablated vectors to. This can be 0.0 (zeroing) or a sentinel
+# out-of-distribution value (e.g. -100.0). Verification logic below compares
+# the modified column against this configured value rather than assuming zero.
+ABLATION_VALUE = 0.0
 NOISE_SCALE = 0.3  # Standard deviation for Gaussian noise (when not ablating)
 
 # Validation Configuration  
-MAX_VECTORS_PER_CONCEPT = 1  # Maximum number of vectors to test per concept
+MAX_VECTORS_PER_CONCEPT = 5  # Maximum number of vectors to test per concept
 SPECIFICITY_THRESHOLD = 0.1  # Threshold for considering a result "concept-specific"
 
 # Generation Configuration
-MAX_NEW_TOKENS = 100  # Maximum tokens to generate per answer
+MAX_NEW_TOKENS = 64  # Maximum tokens to generate per answer
 
 # Disable PyTorch optimizations that require newer CUDA capabilities
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
 os.environ['PYTORCH_DISABLE_AUTOGRAD_CACHE'] = '1'
+# Suppress transformers warnings about generation flags
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+# Also set HuggingFace logging to error and silence known generation-flag warnings
+hf_logging.set_verbosity_error()
+py_logging.getLogger("transformers.generation").setLevel(py_logging.ERROR)
+warnings.filterwarnings("ignore", message="The following generation flags are not valid and may be ignored")
 torch.backends.cuda.enable_flash_sdp(False)  # Disable flash attention
 torch.backends.cuda.enable_mem_efficient_sdp(False)  # Disable memory efficient attention
 
@@ -71,7 +89,7 @@ class SimpleConceptValidator:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float32,  # Use full precision to avoid quantization
-            device_map=device,
+            device_map=None,  # Ensure single-device loading (no sharding)
             trust_remote_code=True,
             attn_implementation="eager",  # Use eager attention to avoid compilation issues
             # Explicitly disable quantization
@@ -80,6 +98,11 @@ class SimpleConceptValidator:
             quantization_config=None,
             token=HF_TOKEN
         )
+        
+        # Move entire model to specified device and set to eval mode
+        self.model.to(device)
+        self.model.eval()  # Ensure dropout is off for consistent results
+        print(f"✅ Model loaded on {device} in eval mode")
         
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
         if self.tokenizer.pad_token is None:
@@ -92,91 +115,165 @@ class SimpleConceptValidator:
         # Store original parameters for restoration (only backup once)
         self.original_params = copy.deepcopy(self.model.state_dict())
         
+        # Run validation test
+        self._test_direct_parameter_modification()
+        
+    def _debug_parameter_paths(self):
+        """Debug: List all down_proj parameters to verify correct paths"""
+        print("🔍 Debugging parameter paths...")
+        down_proj_params = []
+        for name, param in self.model.named_parameters():
+            if 'down_proj' in name:
+                down_proj_params.append((name, param.shape, param.device, param.data_ptr()))
+                print(f"  {name}: shape={param.shape}, device={param.device}, data_ptr={param.data_ptr()}")
+        
+        if not down_proj_params:
+            print("  ❌ No down_proj parameters found!")
+        else:
+            print(f"  ✅ Found {len(down_proj_params)} down_proj parameters")
+        print()
+        
+    def _test_direct_parameter_modification(self):
+        """Test that direct parameter modification works properly using the same approach as validation"""
+        print("🧪 Testing direct parameter modification...")
+        
+        # First debug parameter paths
+        self._debug_parameter_paths()
+        
+        # Test question
+        test_question = "What is the plot of Star Wars? Give me few lines."
+        
+        # Generate baseline answer using the same method as validation
+        print("  Generating baseline answer...")
+        baseline_answer = self.generate_answers([test_question], context="baseline test")[0]
+        print(f"  Baseline: {baseline_answer}")
+        
+        # Test parameter modification using the same approach as validation
+        test_layer = 6
+        print(f"  Ablating entire layer {test_layer} MLP down projection using validation method...")
+        
+        # Get the weight tensor using the same approach as inject_noise_to_vector
+        try:
+            param = self.model.model.layers[test_layer].mlp.down_proj.weight
+            print(f"  Original weight shape: {param.shape}")
+            
+            # COMPREHENSIVE DEBUGGING - Check if we're editing the live parameter
+            print("🔬 Parameter identity checks:")
+            print(f"  param device: {param.device}")
+            print(f"  param id/data_ptr before: {id(param)}, {param.data_ptr()}, requires_grad={param.requires_grad}")
+            print(f"  param norm before: {param.norm().item():.6f}")
+            print(f"  slice before: {param.flatten()[:6].tolist()}")
+            
+            # Store original for restoration (same pattern as inject_noise_to_vector)
+            with torch.no_grad():
+                # Ablate the entire matrix (all dimensions) to 0.0 - same as ABLATION_VALUE
+                param.fill_(ABLATION_VALUE)
+                print(f"  ✂️  Ablated entire down_proj matrix (set to {ABLATION_VALUE})")
+            
+            # Check parameter after modification
+            print("🔬 Parameter checks after modification:")
+            print(f"  slice after: {param.flatten()[:6].tolist()}")
+            print(f"  param norm after: {param.norm().item():.6f}")
+            print(f"  param id/data_ptr after: {id(param)}, {param.data_ptr()}")
+
+            # Verify ablation against configured ABLATION_VALUE
+            if ABLATION:
+                target_full = torch.full_like(param, fill_value=ABLATION_VALUE)
+                if torch.allclose(param, target_full, atol=1e-6, rtol=1e-4):
+                    print(f"  ✅ Layer {test_layer} down_proj successfully set to {ABLATION_VALUE}")
+                else:
+                    maxdiff = (param - target_full).abs().max().item()
+                    print(f"  ❌ Ablation mismatch for layer {test_layer} - max abs diff={maxdiff:.6e} (expected={ABLATION_VALUE})")
+            
+            
+            
+            # Clear cache if available (same as inject_noise_to_vector)
+            if hasattr(self.model, 'clear_cache'):
+                self.model.clear_cache()
+                
+        except (IndexError, AttributeError) as e:
+            print(f"  ❌ Error accessing layer {test_layer}: {e}")
+            return
+        
+        # Generate modified answer using the same method as validation
+        print("  Generating modified answer...")
+        modified_answer = self.generate_answers([test_question], context="modified test")[0]
+        print(f"  Modified: {modified_answer}")
+        
+        # Restore original parameters using the same method as validation
+        print("  Restoring original parameters...")
+        self.restore_original_params()
+        
+        # Verify restoration worked
+        restored_param = self.model.model.layers[test_layer].mlp.down_proj.weight
+        print(f"  Restored param norm: {restored_param.norm().item():.6f}")
+        
+        # Check if answers are different
+        if baseline_answer != modified_answer:
+            print("  ✅ Direct parameter modification working correctly!")
+        else:
+            print("  ⚠️  Warning: Answers identical - this suggests model robustness or modification not taking effect")
+            print("      This could indicate:")
+            print("      - Model has redundant pathways for this knowledge")
+            print("      - Other layers compensate for the ablated layer")
+            print("      - Knowledge is distributed across multiple layers")
+        print()
+        
     def restore_original_params(self):
         """Restore original model parameters"""
         self.model.load_state_dict(self.original_params)
             
     def inject_noise_to_vector(self, layer: int, dimension: int, noise_scale: float = NOISE_SCALE):
         """
-        Inject Gaussian noise to specific concept vector location
+        Inject Gaussian noise to specific concept vector location using direct module access
+        Following Gemma 3B validation methodology
         
         Args:
-            layer: Layer number
-            dimension: Dimension in the layer
+            layer: Layer number (L)
+            dimension: Dimension in the layer (C - concept dimension)  
             noise_scale: Standard deviation of Gaussian noise
         """
-        # For Gemma, use model.layers.{layer}.mlp.down_proj.weight
-        param_name = f'model.layers.{layer}.mlp.down_proj.weight'
+        print(f"Modifying layer {layer}, dimension {dimension}")
         
-    print(f"Attempting to modify parameter: {param_name} (layer {layer}, dim {dimension})")
+        # Access the parameter directly through the module hierarchy
+        # In Gemma's architecture: model.model.layers[L].mlp.down_proj.weight
+        try:
+            weight = self.model.model.layers[layer].mlp.down_proj.weight  # shape [hidden, hidden]
+        except (IndexError, AttributeError) as e:
+            raise ValueError(f"Cannot access layer {layer} down_proj weight: {e}")
         
-        def _modify_tensor(tensor, tensor_name, use_state_dict=False):
-            """Helper function to modify tensor and print debug info"""
-            if dimension < 0 or dimension >= tensor.shape[1]:
-                raise IndexError(f"Dimension index {dimension} out of range for tensor with shape {tensor.shape}")
-
-            # Store original values for verification
-            original_values = tensor[:, dimension].clone()
-            orig_min = original_values.min().item()
-            orig_max = original_values.max().item()
-            orig_mean = float(original_values.mean().item())
-            orig_std = float(original_values.std().item())
-
-            with torch.no_grad():
-                if ABLATION:
-                    tensor[:, dimension] = ABLATION_VALUE
-                else:
-                    hidden_size = self.model.config.hidden_size
-                    noise = torch.normal(0, noise_scale, size=(hidden_size,)).to(tensor.device if not use_state_dict else self.device)
-                    tensor[:, dimension] += noise
-
-            # Compute new stats for quick verification
-            new_values = tensor[:, dimension]
-            new_min = new_values.min().item()
-            new_max = new_values.max().item()
-            new_mean = float(new_values.mean().item())
-            new_std = float(new_values.std().item())
-
-            action = 'ablation' if ABLATION else f'noise(σ={noise_scale})'
-            print(f"  -> Performed {action} on {tensor_name}[ :, {dimension} ]")
-            print(f"     before: min={orig_min:.6f}, max={orig_max:.6f}, mean={orig_mean:.6f}, std={orig_std:.6f}")
-            print(f"     after : min={new_min:.6f}, max={new_max:.6f}, mean={new_mean:.6f}, std={new_std:.6f}")
+        # Validate dimension bounds
+        if dimension < 0 or dimension >= weight.shape[1]:
+            raise IndexError(f"Dimension {dimension} out of range for tensor shape {weight.shape}")
+        
+        # Direct weight modification and verification
+        with torch.no_grad():
+            # Store original column for verification
+            orig_col = weight[:, dimension].clone()
+            orig_norm = orig_col.norm().item()
             
-            return original_values
+            print(f"  🔬 Column {dimension} before: norm={orig_norm:.6f}")
+            print(f"      Sample values: {orig_col[:3].tolist()}")
+            
+            if ABLATION:
+                # Ablate: set column C to the configured ablation value
+                # (may be 0.0 for zeroing or an extreme sentinel like -100.0)
+                weight[:, dimension] = ABLATION_VALUE
+                print(f"  ✂️  Ablated column {dimension} (set to {ABLATION_VALUE})")
+            else:
+                # Inject noise: add Gaussian noise to column C
+                noise = torch.normal(0, noise_scale, size=(weight.shape[0],), device=weight.device)
+                weight[:, dimension] += noise
+                print(f"  🎲 Added noise σ={noise_scale} to column {dimension}")
+            
+            # Verify the modification took effect
+            new_col = weight[:, dimension]
+            new_norm = new_col.norm().item()
+            print(f"  🔬 Column {dimension} after: norm={new_norm:.6f}")
+            print(f"     - Sample values: {new_col[:5].tolist()}")
+            
         
-        # Try to find the actual parameter object via named_parameters() for in-place edit
-        found = False
-        for name, param in self.model.named_parameters(recurse=True):
-            if name == param_name:
-                found = True
-                # Sanity check shape and device
-                shape = tuple(param.data.shape)
-                dev = param.device
-                print(f"Found parameter '{name}' shape={shape} device={dev}; modifying in-place")
-
-                original_values = _modify_tensor(param.data, name, use_state_dict=False)
-                break
-
-        if found:
-            # Clear any cached computations
-            if hasattr(self.model, 'clear_cache'):
-                self.model.clear_cache()
-            return
-
-    print(f"WARNING: Parameter {param_name} not found via named_parameters(); falling back to state_dict")
-        # Fallback: operate on state_dict and reload (slower but robust)
-        state = self.model.state_dict()
-        if param_name not in state:
-            raise KeyError(f"Parameter not found in model state: {param_name}")
-
-        # Use helper function for state_dict path too
-        tensor = state[param_name]
-    original_values = _modify_tensor(tensor, param_name, use_state_dict=True)
-
-    # Reload the model with modified state
-    self.model.load_state_dict(state)
-        
-        # Clear any cached computations
+        # Clear any cached computations to force fresh forward pass
         if hasattr(self.model, 'clear_cache'):
             self.model.clear_cache()
         
@@ -185,7 +282,7 @@ class SimpleConceptValidator:
         Generate answers for a list of questions using proper Gemma 3 chat format
         
         Args:
-            questions: List of questions to answer
+            questions: List of questions to answerq
             max_new_tokens: Maximum number of new tokens to generate
             context: Context string for progress display (e.g., "baseline concept", "perturbed unrelated")
             
@@ -195,10 +292,10 @@ class SimpleConceptValidator:
         answers = []
         total_questions = len(questions)
         
-    print(f"    Generating {context} answers ({total_questions})...")
+        print(f"    Generating {context} answers ({total_questions})...")
         
         # Process each question individually using proper chat template
-    for i, question in enumerate(questions, 1):
+        for i, question in enumerate(questions, 1):
             
             # Create proper message format for Gemma 3
             messages = [
@@ -219,30 +316,50 @@ class SimpleConceptValidator:
 
             # Move inputs to the device where the model parameters live
             model_device = next(self.model.parameters()).device
+            # Ensure inputs are a plain dict so we can sanitize generation kwargs
             try:
-                inputs = inputs.to(model_device)
+                inputs = dict(inputs)
             except Exception:
-                # Fall back to manual move if BatchEncoding doesn't support .to()
+                pass
+
+            # Remove unsupported generation flags that some tokenizers may include
+            for _bad in ('top_p', 'top_k', 'cache_implementation'):
+                if _bad in inputs:
+                    inputs.pop(_bad, None)
+
+            try:
                 inputs = {k: v.to(model_device) if hasattr(v, 'to') else v for k, v in inputs.items()}
+            except Exception:
+                # Fall back: try BatchEncoding .to() if available
+                try:
+                    inputs = inputs.to(model_device)
+                except Exception:
+                    pass
             
-            # Generate response
+            # Generate response using Gemma 3B methodology
             with torch.no_grad():
-                generation_output = self.model.generate(
+                # Greedy response generation with proper parameters
+                outputs = self.model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    use_cache=True,
-                    output_scores=False,
-                    return_dict_in_generate=False
+                    do_sample=False,  # Pure greedy decoding (no sampling)
+                    pad_token_id=self.tokenizer.eos_token_id,  # Proper termination
+                    use_cache=False,  # Force fresh forward pass (no stale cache)
+                    output_scores=True,  # Get raw logits for analysis
+                    return_dict_in_generate=True  # Return structured output
                 )
 
             # Decode only the newly generated tokens and append
-            new_tokens = generation_output[0][inputs["input_ids"].shape[-1]:]
+            new_tokens = outputs.sequences[0][inputs["input_ids"].shape[-1]:]
             answer = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
             answers.append(answer)
+            
+            # Print each question and its generated answer for debugging
+            if "perturbed" in context.lower():
+                print(f"      Q{i}: {question[:80]}{'...' if len(question) > 80 else ''}")
+                print(f"      A{i}: {answer[:100]}{'...' if len(answer) > 100 else ''}")
         
-    print(f"    Completed {context} generation ({total_questions} answers)")
+        print(f"    Completed {context} generation ({total_questions} answers)")
         return answers
     
     def calculate_bleu(self, reference: str, candidate: str) -> float:
@@ -307,7 +424,7 @@ class SimpleConceptValidator:
         unrelated_questions = unrelated_qa['questions']
         unrelated_baseline_answers = unrelated_qa['answers']
         
-    print(f"Validating {vector_key} (L{layer},C{dimension}) — concept_q={len(concept_questions)}, unrelated_q={len(unrelated_questions)}")
+        print(f"Validating {vector_key} (L{layer},C{dimension}) — concept_q={len(concept_questions)}, unrelated_q={len(unrelated_questions)}")
         
         try:
             # Inject noise/ablation and generate perturbed answers
@@ -461,7 +578,7 @@ def load_concept_vectors_from_results(results_file: str) -> Dict[str, Dict]:
 def main():
     """Main function to run simple concept vector validation"""
     
-        # Paths
+    # Paths
     base_path = Path("/media/hdd/usr/martinelli/concept-vectors-gemma3")
     qa_file = base_path / "code/concept_val_test/qa-generated.json"
     results_file = base_path / "code/projection/final_concept_vectors/final_concept_vectors.json"
@@ -532,74 +649,74 @@ def main():
     total_concepts = len([c for c in concept_vectors.keys() if c in concept_qa_map])
 
     for concept_name, vectors in concept_vectors.items():
-            if concept_name not in concept_qa_map:
-                print(f"⚠️ Warning: No QA data found for concept {concept_name}")
+        if concept_name not in concept_qa_map:
+            print(f"⚠️ Warning: No QA data found for concept {concept_name}")
+            continue
+            
+        concept_count += 1
+        print(f"\n{'🧪' * 3} CONCEPT {concept_count}/{total_concepts}: {concept_name.upper()} {'🧪' * 3}")
+        
+        concept_qa = concept_qa_map[concept_name]
+        if not concept_qa['questions'] or not concept_qa['answers']:
+            print(f"⚠️ Warning: Empty QA list for concept {concept_name}")
+            continue
+            
+        # Get unrelated questions and answers (from other concepts)
+        unrelated_questions = []
+        unrelated_answers = []
+        for other_concept, other_qa in concept_qa_map.items():
+            if other_concept != concept_name and other_qa['questions'] and other_qa['answers']:
+                unrelated_questions.extend(other_qa['questions'])
+                unrelated_answers.extend(other_qa['answers'])
+        
+        # Limit unrelated questions to match concept questions length
+        if len(unrelated_questions) > len(concept_qa['questions']):
+            indices = random.sample(range(len(unrelated_questions)), len(concept_qa['questions']))
+            unrelated_questions = [unrelated_questions[i] for i in indices]
+            unrelated_answers = [unrelated_answers[i] for i in indices]
+        
+        unrelated_qa = {'questions': unrelated_questions, 'answers': unrelated_answers}
+        
+        print(f"\n🎯 Testing concept: {concept_name}")
+        print(f"   📝 Concept questions: {len(concept_qa['questions'])}")
+        print(f"   📝 Unrelated questions: {len(unrelated_questions)}")
+        
+        # Show sample baseline answers for this concept
+        print(f"   Sample baseline (first 2 Q&A shown)")
+        for i, (q, a) in enumerate(zip(concept_qa['questions'][:2], concept_qa['answers'][:2])):
+            print(f"      Q{i+1}: {q[:60]}{'...' if len(q) > 60 else ''}")
+            print(f"      A{i+1}: {a[:80]}{'...' if len(a) > 80 else ''}")
+        
+        # Test up to `max_vectors_per_concept` candidates (best first)
+        for rank, candidate in enumerate(vectors[:max_vectors_per_concept], start=1):
+            best_vector = candidate
+            # Handle the vector_key field
+            vector_key = best_vector.get('vector_key') or best_vector.get('key') or best_vector.get('id')
+            if not vector_key:
+                print(f"    ⚠️ Warning: No vector_key found in vector_info for {concept_name} (rank {rank})")
                 continue
-                
-            concept_count += 1
-            print(f"\n{'🧪' * 3} CONCEPT {concept_count}/{total_concepts}: {concept_name.upper()} {'🧪' * 3}")
-            
-            concept_qa = concept_qa_map[concept_name]
-            if not concept_qa['questions'] or not concept_qa['answers']:
-                print(f"⚠️ Warning: Empty QA list for concept {concept_name}")
+
+            print(f"\n  🧬 Testing candidate rank {rank}: {vector_key}")
+            print(f"     📍 Location: Layer {best_vector.get('layer', '?')}, Neuron {best_vector.get('neuron', '?')}")
+            print(f"     💪 Activation strength: {best_vector.get('concept_activation_strength', '?')}")
+
+            try:
+                result = validator.validate_concept_vector_from_key(
+                    vector_key=vector_key,
+                    concept_qa=concept_qa,
+                    unrelated_qa=unrelated_qa,
+                    noise_scale=noise_scale
+                )
+
+                result['concept_name'] = concept_name
+                result['vector_rank'] = rank
+                result['vector_info'] = best_vector
+
+                all_results.append(result)
+
+            except Exception as e:
+                print(f"    Error testing vector {vector_key}: {str(e)}")
                 continue
-            
-            # Get unrelated questions and answers (from other concepts)
-            unrelated_questions = []
-            unrelated_answers = []
-            for other_concept, other_qa in concept_qa_map.items():
-                if other_concept != concept_name and other_qa['questions'] and other_qa['answers']:
-                    unrelated_questions.extend(other_qa['questions'])
-                    unrelated_answers.extend(other_qa['answers'])
-            
-            # Limit unrelated questions to match concept questions length
-            if len(unrelated_questions) > len(concept_qa['questions']):
-                indices = random.sample(range(len(unrelated_questions)), len(concept_qa['questions']))
-                unrelated_questions = [unrelated_questions[i] for i in indices]
-                unrelated_answers = [unrelated_answers[i] for i in indices]
-            
-            unrelated_qa = {'questions': unrelated_questions, 'answers': unrelated_answers}
-            
-            print(f"\n🎯 Testing concept: {concept_name}")
-            print(f"   📝 Concept questions: {len(concept_qa['questions'])}")
-            print(f"   📝 Unrelated questions: {len(unrelated_questions)}")
-            
-            # Show sample baseline answers for this concept
-            print(f"   Sample baseline (first 2 Q&A shown)")
-            for i, (q, a) in enumerate(zip(concept_qa['questions'][:2], concept_qa['answers'][:2])):
-                print(f"      Q{i+1}: {q[:60]}{'...' if len(q) > 60 else ''}")
-                print(f"      A{i+1}: {a[:80]}{'...' if len(a) > 80 else ''}")
-            
-            # Test up to `max_vectors_per_concept` candidates (best first)
-            for rank, candidate in enumerate(vectors[:max_vectors_per_concept], start=1):
-                best_vector = candidate
-                # Handle the vector_key field
-                vector_key = best_vector.get('vector_key') or best_vector.get('key') or best_vector.get('id')
-                if not vector_key:
-                    print(f"    ⚠️ Warning: No vector_key found in vector_info for {concept_name} (rank {rank})")
-                    continue
-
-                print(f"\n  🧬 Testing candidate rank {rank}: {vector_key}")
-                print(f"     📍 Location: Layer {best_vector.get('layer', '?')}, Neuron {best_vector.get('neuron', '?')}")
-                print(f"     💪 Activation strength: {best_vector.get('concept_activation_strength', '?')}")
-
-                try:
-                    result = validator.validate_concept_vector_from_key(
-                        vector_key=vector_key,
-                        concept_qa=concept_qa,
-                        unrelated_qa=unrelated_qa,
-                        noise_scale=noise_scale
-                    )
-
-                    result['concept_name'] = concept_name
-                    result['vector_rank'] = rank
-                    result['vector_info'] = best_vector
-
-                    all_results.append(result)
-
-                except Exception as e:
-                    print(f"    Error testing vector {vector_key}: {str(e)}")
-                    continue
         
     # Single-run summary printed below
     

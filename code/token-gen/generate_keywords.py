@@ -3,6 +3,15 @@ import re
 import os
 import glob
 import warnings
+# Ensure private Hugging Face cache is set before importing transformers
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+
+# Respect HF token if provided externally
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
 from transformers import AutoProcessor, AutoModelForCausalLM
 import torch
 
@@ -18,17 +27,6 @@ os.environ['TORCHDYNAMO_DISABLE'] = '1'
 # Enable memory fragmentation fix for CUDA
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
-# Set environment variables for personal Hugging Face cache
-os.environ['HF_HOME'] = '/media/hdd/usr/martinelli/.cache/huggingface'
-os.environ['TRANSFORMERS_CACHE'] = '/media/hdd/usr/martinelli/.cache/huggingface/transformers'
-os.environ['HF_DATASETS_CACHE'] = '/media/hdd/usr/martinelli/.cache/huggingface/datasets'
-os.environ['HF_HUB_CACHE'] = '/media/hdd/usr/martinelli/.cache/huggingface/hub'
-
-# Set your personal HuggingFace token to avoid conflicts with other users
-# Set via environment variable for security
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-if not HF_TOKEN:
-    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
 
 def load_model_and_tokenizer():
     """Load the gemma-3-4b-it model and processor with proper chat template support."""

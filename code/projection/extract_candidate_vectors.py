@@ -26,17 +26,19 @@ import numpy as np
 import json
 import os
 from typing import Dict, List, Tuple, Optional
+# Ensure private Hugging Face cache is set before importing transformers
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ['HF_HOME'] = PRIVATE_HF_HOME
+
+# Export HF_TOKEN for use by transformers if present in the environment
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
 from transformers import AutoModel, AutoTokenizer
 import gc
 from tqdm import tqdm
 
-# Add your Hugging Face token via environment variable for security
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-if not HF_TOKEN:
-    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
-
-# Set environment variables for personal Hugging Face cache
-os.environ['HF_HOME'] = '/media/hdd/usr/martinelli/.cache/huggingface'
 
 class GemmaCandidateVectorExtractor:
     """Extract candidate vectors from Gemma 3 1B MLP layers"""

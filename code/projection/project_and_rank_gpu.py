@@ -32,24 +32,26 @@ Mathematical approach (vectorized):
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import json
 import os
 import re
 import gc
 from typing import Dict, List, Tuple
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
+from transformers import AutoTokenizer
 from tqdm import tqdm
 
-# Configure environment for HuggingFace
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-if not HF_TOKEN:
-    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
-    
-os.environ["HF_TOKEN"] = HF_TOKEN
-os.environ["HF_HOME"] = "/media/hdd/usr/martinelli/.cache/huggingface"
 
 # Global configuration for target MLP layers
-TARGET_LAYER_START = 12  # First layer to include (inclusive)
-TARGET_LAYER_END = 24    # Last layer to include (inclusive)
+TARGET_LAYER_START = 1  # First layer to include (inclusive)
+TARGET_LAYER_END = 26    # Last layer to include (inclusive)
 TARGET_LAYERS = list(range(TARGET_LAYER_START, TARGET_LAYER_END + 1))
 
 class ConceptVectorProjectorGPU:
@@ -222,7 +224,8 @@ class ConceptVectorProjectorGPU:
         return token_groups, group_keys
     
     def compute_concept_token_scores_gpu(self, concept_embeddings_gpu: torch.Tensor, 
-                                        batch_vectors_gpu: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
+                                        batch_vectors_gpu: torch.Tensor,
+                                        normalize: bool = True) -> Tuple[torch.Tensor, Dict]:
         """
         GPU-accelerated computation of concept token scores for a batch of vectors
         
@@ -235,6 +238,11 @@ class ConceptVectorProjectorGPU:
             - batch_scores_gpu: Token scores (n_tokens x batch_size) on GPU
             - batch_stats: Dictionary with batch statistics
         """
+        # Optional normalization to remove norm effects and focus on angular similarity
+        if normalize:
+            concept_embeddings_gpu = F.normalize(concept_embeddings_gpu, p=2, dim=1)
+            batch_vectors_gpu = F.normalize(batch_vectors_gpu, p=2, dim=1)
+
         # Batch matrix multiplication: E_C @ V_batch^T
         # Shape: (n_concept_tokens, batch_size)
         batch_scores = torch.mm(concept_embeddings_gpu, batch_vectors_gpu.t())
@@ -282,7 +290,7 @@ class ConceptVectorProjectorGPU:
         group_scores = torch.empty(num_groups, batch_size, device=self.device, dtype=torch.float32)
         best_token_indices = torch.empty(num_groups, batch_size, device=self.device, dtype=torch.long)
         
-        # Compute group scores (max over group members for each vector in batch)
+        # Compute group scores (sum over group members for each vector in batch)
         for gi, group_key in enumerate(group_keys):
             member_indices = group_map[group_key]
             
@@ -292,10 +300,12 @@ class ConceptVectorProjectorGPU:
                 group_scores[gi] = batch_scores_gpu[idx]
                 best_token_indices[gi] = idx
             else:
-                # Multiple tokens in group - take max
+                # Multiple tokens in group - sum all member scores
                 member_scores = batch_scores_gpu[member_indices]  # (n_members x batch_size)
+                sum_scores = torch.sum(member_scores, dim=0)  # (batch_size,)
+                group_scores[gi] = sum_scores
+                # For best_token_indices, still track which token had the highest individual score
                 max_scores, max_indices = torch.max(member_scores, dim=0)  # (batch_size,)
-                group_scores[gi] = max_scores
                 best_token_indices[gi] = torch.tensor(member_indices, device=self.device)[max_indices]
         
         return group_scores, best_token_indices
@@ -363,8 +373,8 @@ class ConceptVectorProjectorGPU:
             small_emb = concept_embeddings[:nt]
             small_vecs = self.candidate_vectors_gpu[:nv].cpu().numpy()
             dots = small_emb @ small_vecs.T
-            print(f"  🔎 Sample dot stats (first {nt} tokens x first {nv} vectors): mean={float(np.mean(dots)):.6e}, std={float(np.std(dots)):.6e}, max={float(np.max(dots)):.6e}, min={float(np.min(dots)):.6e}")
-            print(f"  🔎 Example single token · vector = {sample_dot:.6e}")
+            print(f"  🔎 Sample dot stats (first {nt} tokens x first {nv} vectors): mean={float(np.mean(dots)):.6f}, std={float(np.std(dots)):.6f}, max={float(np.max(dots)):.6f}, min={float(np.min(dots)):.6f}")
+            print(f"  🔎 Example single token · vector = {sample_dot:.6f}")
         except Exception:
             pass
         analysis_results = []

@@ -28,7 +28,14 @@ import numpy as np
 import torch
 # Use the same private Hugging Face cache as other projection scripts
 # This ensures models download to the user's private cache directory
-os.environ['HF_HOME'] = '/media/hdd/usr/martinelli/.cache/huggingface'
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ['HF_HOME'] = PRIVATE_HF_HOME
+
+# Respect HF token if provided externally
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
+os.environ["HF_TOKEN"] = HF_TOKEN
 
 try:
     from transformers import AutoModelForCausalLM, AutoModel, AutoConfig

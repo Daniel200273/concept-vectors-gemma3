@@ -12,18 +12,21 @@ import torch
 import numpy as np
 import json
 import os
+# Ensure private Hugging Face cache is set before importing transformers
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+
+# Respect HF token if provided externally
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
 from transformers import AutoTokenizer, AutoModel
 from tqdm import tqdm
 import argparse
 from typing import Dict
 
-# Configure environment for HuggingFace
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-if not HF_TOKEN:
-    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
-    
-os.environ["HF_TOKEN"] = HF_TOKEN
-os.environ["HF_HOME"] = "/media/hdd/usr/martinelli/.cache/huggingface"
+
 
 class FullVocabularyEmbeddingExtractor:
     """Extract embeddings for the entire Gemma-3 vocabulary"""

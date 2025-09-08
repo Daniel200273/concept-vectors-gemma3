@@ -34,7 +34,11 @@ if not HF_TOKEN:
     raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
     
 os.environ["HF_TOKEN"] = HF_TOKEN
-os.environ["HF_HOME"] = "/media/hdd/usr/martinelli/.cache/huggingface"
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(PRIVATE_HF_HOME, "transformers")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(PRIVATE_HF_HOME, "hub")
+os.environ["HF_DATASETS_CACHE"] = os.path.join(PRIVATE_HF_HOME, "datasets")
 
 # Disable PyTorch compilation for compatibility
 os.environ['TORCH_COMPILE_DISABLE'] = '1'

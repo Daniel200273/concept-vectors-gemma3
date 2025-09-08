@@ -17,17 +17,18 @@ import numpy as np
 import json
 import os
 from typing import Dict, List, Set, Tuple
-from transformers import AutoModel, AutoTokenizer
+# Ensure private Hugging Face cache is set before importing transformers
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ['HF_HOME'] = PRIVATE_HF_HOME
+
+# Export HF_TOKEN if provided externally
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
+from transformers import AutoModelForCausalLM, AutoModel, AutoTokenizer
 from tqdm import tqdm
 import gc
-
-# Add your Hugging Face token via environment variable for security
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-if not HF_TOKEN:
-    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
-
-# Set environment variables for personal Hugging Face cache
-os.environ['HF_HOME'] = '/media/hdd/usr/martinelli/.cache/huggingface'
 
 class GemmaTokenEmbeddingExtractor:
     """Extract token embeddings from Gemma 3 1B embedding layer"""
@@ -57,8 +58,9 @@ class GemmaTokenEmbeddingExtractor:
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         
-        # Load model with full precision
-        self.model = AutoModel.from_pretrained(
+        # Load model with full precision using the CausalLM class to expose LM head / output embeddings
+        # Using AutoModelForCausalLM ensures get_output_embeddings()/lm_head are available on most model classes
+        self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.float32,  # Use full precision
             device_map=self.device,
@@ -70,7 +72,57 @@ class GemmaTokenEmbeddingExtractor:
         )
         
         # Extract embedding layer
-        self.embedding_layer = self.model.embed_tokens
+        # Find the LM head / output projection module robustly. Some model classes expose
+        # get_output_embeddings(), others use attribute names like lm_head, embed_out, etc.
+        out_mod = None
+        try:
+            if hasattr(self.model, "get_output_embeddings"):
+                out_mod = self.model.get_output_embeddings()
+        except Exception:
+            out_mod = None
+
+        if out_mod is None:
+            for name in ("lm_head", "embed_out", "output_projection", "head", "lm_head_proj"):
+                mod = getattr(self.model, name, None)
+                if mod is not None and hasattr(mod, "weight"):
+                    out_mod = mod
+                    break
+
+        if out_mod is None:
+            # Last resort: scan for a parameter/attr with a 2D weight that matches expected dims
+            for name in dir(self.model):
+                try:
+                    attr = getattr(self.model, name)
+                    w = getattr(attr, "weight", None)
+                    if isinstance(w, torch.Tensor) and w.ndim == 2:
+                        # Accept any 2D linear as possible lm head (best-effort)
+                        out_mod = attr
+                        break
+                except Exception:
+                    continue
+
+        if out_mod is None:
+            raise RuntimeError("Could not locate an output/LM head embedding module on the model; check model class")
+
+        self.embedding_layer = out_mod
+
+        # Quick precision check to ensure weights are full-precision after loading
+        try:
+            # Try a specific weight path if available, otherwise use the first parameter
+            sample_weight = None
+            if hasattr(self.model, "layers") and len(getattr(self.model, "layers")) > 0:
+                layer0 = getattr(self.model, "layers")[0]
+                sample_weight = getattr(layer0, "mlp", None)
+                if sample_weight is not None and hasattr(sample_weight, "down_proj"):
+                    sample_weight = sample_weight.down_proj.weight
+            if sample_weight is None:
+                # fallback to first parameter
+                sample_weight = next(self.model.parameters())
+
+            print(f"Sample weight dtype: {sample_weight.dtype}, requires_grad: {sample_weight.requires_grad}")
+        except Exception:
+            # Don't fail the pipeline for missing attributes; just skip the check
+            pass
         
         print(f"✅ Model loaded successfully!")
         print(f"📋 Embedding layer shape: {self.embedding_layer.weight.shape}")
@@ -150,13 +202,26 @@ class GemmaTokenEmbeddingExtractor:
         for i in tqdm(range(0, len(token_ids), batch_size), desc="Extracting embeddings"):
             batch_ids = token_ids[i:i+batch_size]
             
-            # Convert to tensor
-            ids_tensor = torch.tensor(batch_ids, device=self.embedding_layer.weight.device)
+            # Extract embeddings by indexing the weight matrix directly
+            # The LM head weight is typically (vocab_size, hidden_size) for most models
+            weight = getattr(self.embedding_layer, "weight", None)
             
-            # Extract embeddings
-            with torch.no_grad():
-                batch_embeddings = self.embedding_layer(ids_tensor)  # Shape: (batch_size, hidden_size)
-                batch_embeddings = batch_embeddings.cpu().numpy().astype(np.float32)
+            if isinstance(weight, torch.Tensor):
+                w = weight.detach().cpu().numpy()
+                # Handle common shapes: (vocab, hidden) or (hidden, vocab)
+                if w.ndim == 2:
+                    if w.shape[1] == self.hidden_size:
+                        # Shape is (vocab, hidden) - this is the standard case
+                        batch_embeddings = w[np.array(batch_ids)]
+                    elif w.shape[0] == self.hidden_size:
+                        # Shape is (hidden, vocab) - transpose and index
+                        batch_embeddings = w.T[np.array(batch_ids)]
+                    else:
+                        raise RuntimeError(f"Cannot match embedding weight shape {w.shape} to expected hidden size {self.hidden_size}")
+                else:
+                    raise RuntimeError(f"Embedding weight has unexpected ndim={w.ndim}")
+            else:
+                raise RuntimeError("Could not find weight attribute on embedding layer")
             
             # Store embeddings
             for j, token_id in enumerate(batch_ids):

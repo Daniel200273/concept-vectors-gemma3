@@ -26,15 +26,18 @@ import json
 import os
 import re
 from typing import Dict, List, Tuple
-from tqdm import tqdm
+# Ensure private Hugging Face cache is set before importing transformers
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
 
-# Configure environment for HuggingFace
+# Export HF_TOKEN if provided externally
 HF_TOKEN = os.getenv("HF_TOKEN", None)
-if not HF_TOKEN:
-    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
+from transformers import AutoTokenizer
     
-os.environ["HF_TOKEN"] = HF_TOKEN
-os.environ["HF_HOME"] = "/media/hdd/usr/martinelli/.cache/huggingface"
+
 
 class ConceptVectorProjector:
     """Analyze value vectors by computing token activation scores for concepts"""

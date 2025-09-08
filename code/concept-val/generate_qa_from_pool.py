@@ -33,7 +33,11 @@ DEFAULT_INPUT = os.path.join(HERE, "questions.json")
 DEFAULT_OUTPUT = os.path.join(HERE, "qa.json")
 MODEL_ID = os.environ.get("GEMMA_MODEL", "google/gemma-3-1b-it")
 
-os.environ.setdefault("HF_HOME", "/media/hdd/usr/martinelli/.cache/huggingface")
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(PRIVATE_HF_HOME, "transformers")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(PRIVATE_HF_HOME, "hub")
+os.environ["HF_DATASETS_CACHE"] = os.path.join(PRIVATE_HF_HOME, "datasets")
 
 # Get HuggingFace token from environment variable for security
 HF_TOKEN = os.getenv("HF_TOKEN", None)

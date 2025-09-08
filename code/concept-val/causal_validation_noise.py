@@ -47,6 +47,15 @@ import sacrebleu  # type: ignore
 from rouge_score import rouge_scorer  # type: ignore
 import pandas as pd  # type: ignore
 
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+
+# Export HF_TOKEN if provided externally
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
+os.environ["HF_TOKEN"] = HF_TOKEN
+
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import logging as transformers_logging
 
@@ -54,7 +63,11 @@ from transformers import logging as transformers_logging
 transformers_logging.set_verbosity_error()
 
 # Env defaults to match repo
-os.environ.setdefault("HF_HOME", "/media/hdd/usr/martinelli/.cache/huggingface")
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(PRIVATE_HF_HOME, "transformers")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(PRIVATE_HF_HOME, "hub")
+os.environ["HF_DATASETS_CACHE"] = os.path.join(PRIVATE_HF_HOME, "datasets")
 os.environ.setdefault("HF_TOKEN", "")
 # Disable compilation for older GPUs (CUDA capability < 7.0)
 os.environ['TORCH_COMPILE_DISABLE'] = '1'

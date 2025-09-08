@@ -22,11 +22,11 @@ import json
 
 # Configure environment for HuggingFace
 HF_TOKEN = os.getenv("HF_TOKEN", None)
-if not HF_TOKEN:
-    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
     
-os.environ["HF_TOKEN"] = HF_TOKEN
-os.environ["HF_HOME"] = "/media/hdd/usr/martinelli/.cache/huggingface"
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
 
 # Import our modules
 from extract_candidate_vectors import GemmaCandidateVectorExtractor

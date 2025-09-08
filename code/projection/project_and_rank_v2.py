@@ -27,7 +27,16 @@ import os
 import re
 from typing import Dict, List, Tuple, Optional, Set
 from tqdm import tqdm
-from collections import defaultdict
+# Ensure private Hugging Face cache is set before importing transformers
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+
+# Export HF_TOKEN if provided externally
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
+from transformers import AutoTokenizer
 
 # Configure environment for HuggingFace
 HF_TOKEN = os.getenv("HF_TOKEN", None)
@@ -35,7 +44,11 @@ if not HF_TOKEN:
     raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
     
 os.environ["HF_TOKEN"] = HF_TOKEN
-os.environ["HF_HOME"] = "/media/hdd/usr/martinelli/.cache/huggingface"
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(PRIVATE_HF_HOME, "transformers")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(PRIVATE_HF_HOME, "hub")
+os.environ["HF_DATASETS_CACHE"] = os.path.join(PRIVATE_HF_HOME, "datasets")
 
 class ConceptVectorProjectorV2:
     """Analyze value vectors by projecting onto entire vocabulary and filtering by concept activation patterns"""

@@ -10,6 +10,16 @@ import random
 import statistics
 import os
 from pathlib import Path
+# Ensure private Hugging Face cache is set before importing transformers
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+
+# Respect an externally set HF_TOKEN and export it for HuggingFace libraries
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
+os.environ["HF_TOKEN"] = HF_TOKEN
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
@@ -24,12 +34,7 @@ from typing import List, Dict, Tuple, Any
 MODEL_ID = os.environ.get("GEMMA_MODEL", "google/gemma-3-1b-it")
 DEVICE = "cuda:1"
 
-# HuggingFace setup
-os.environ.setdefault("HF_HOME", "/media/hdd/usr/martinelli/.cache/huggingface")
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-if not HF_TOKEN:
-    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
-os.environ["HF_TOKEN"] = HF_TOKEN
+
 
 # Ablation Configuration
 ABLATION = True  # When True, ablate vectors; when False, add noise

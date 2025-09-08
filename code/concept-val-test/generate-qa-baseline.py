@@ -22,6 +22,16 @@ import re
 from typing import List, Dict, Any, Optional
 
 import torch
+# Ensure private Hugging Face cache is set before importing transformers
+PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
+os.environ["HF_HOME"] = PRIVATE_HF_HOME
+
+# Respect an externally provided HF_TOKEN; if present, export it for HF libs
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+if not HF_TOKEN:
+    raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
+os.environ["HF_TOKEN"] = HF_TOKEN
+
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +40,6 @@ PROMPT_FILE = os.path.join(HERE, "qa-prompt.txt")
 DEFAULT_OUTPUT = os.path.join(HERE, "qa-generated.json")
 MODEL_ID = os.environ.get("GEMMA_MODEL", "google/gemma-3-1b-it")
 
-os.environ.setdefault("HF_HOME", "/media/hdd/usr/martinelli/.cache/huggingface")
 
 # Get HuggingFace token from environment variable for security
 HF_TOKEN = os.getenv("HF_TOKEN", None)
@@ -130,7 +139,7 @@ def generate_questions_for_concept(tokenizer, model, prompt_template: str, conce
         return None
 
 
-def answer_single_question(tokenizer, model, concept: str, question: str, max_new_tokens: int = 200) -> str:
+def answer_single_question(tokenizer, model, concept: str, question: str, max_new_tokens: int = 64) -> str:
     """Prompt the model once per question to obtain an answer string.
 
     Returns the answer as plain text.
