@@ -58,11 +58,11 @@ class GemmaTokenEmbeddingExtractor:
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         
-        # Load model with full precision using the CausalLM class to expose LM head / output embeddings
+        # Load model using the model's default precision (do not force dtype)
         # Using AutoModelForCausalLM ensures get_output_embeddings()/lm_head are available on most model classes
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float32,  # Use full precision
+            # Use native bfloat16 when available; do not force full float32
             device_map=self.device,
             trust_remote_code=True,
             # Explicitly disable quantization
@@ -106,7 +106,7 @@ class GemmaTokenEmbeddingExtractor:
 
         self.embedding_layer = out_mod
 
-        # Quick precision check to ensure weights are full-precision after loading
+        # Quick precision check to report the model's parameter dtype after loading
         try:
             # Try a specific weight path if available, otherwise use the first parameter
             sample_weight = None
@@ -119,12 +119,15 @@ class GemmaTokenEmbeddingExtractor:
                 # fallback to first parameter
                 sample_weight = next(self.model.parameters())
 
+            # Save actual model dtype for downstream metadata
+            self.model_dtype = next(self.model.parameters()).dtype
             print(f"Sample weight dtype: {sample_weight.dtype}, requires_grad: {sample_weight.requires_grad}")
+            print(f"🎯 Model dtype: {self.model_dtype} (model default)")
         except Exception:
             # Don't fail the pipeline for missing attributes; just skip the check
             pass
         
-        print(f"✅ Model loaded successfully!")
+        print(f"✅ Model loaded successfully (using model default precision)")
         print(f"📋 Embedding layer shape: {self.embedding_layer.weight.shape}")
         print(f"📊 Vocabulary size: {len(self.tokenizer):,}")
     
@@ -187,7 +190,7 @@ class GemmaTokenEmbeddingExtractor:
                 "embedding_dimension": self.hidden_size,
                 "total_unique_tokens": len(unique_tokens),
                 "vocabulary_size": self.vocab_size,
-                "data_type": "float32"
+                "data_type": str(getattr(self, "model_dtype", "unknown"))
             },
             "embeddings": {},
             "concept_mappings": {}
@@ -281,7 +284,7 @@ class GemmaTokenEmbeddingExtractor:
         embeddings_array = np.array([
             embedding_db["embeddings"][str(tid)]["embedding"] 
             for tid in token_ids
-        ], dtype=np.float32)
+        ])  # No dtype forcing - preserve original precision
         
         numpy_path = os.path.join(output_dir, "token_embeddings.npy")
         np.save(numpy_path, embeddings_array)

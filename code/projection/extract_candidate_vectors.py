@@ -81,14 +81,13 @@ class GemmaCandidateVectorExtractor:
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, token=HF_TOKEN)
         
-        # Load model in FULL PRECISION to avoid quantization
+        # Load model using the model's default precision (do not force dtype)
         self.model = AutoModel.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float32,  # Use full 32-bit precision to avoid quantization
             device_map={"": int(self.device.split(':')[1])} if "cuda" in self.device else self.device,
             trust_remote_code=True,
             token=HF_TOKEN,
-            # Explicitly disable quantization
+            # Explicitly disable quantization flags (if present)
             load_in_8bit=False,
             load_in_4bit=False,
             quantization_config=None
@@ -101,9 +100,11 @@ class GemmaCandidateVectorExtractor:
         assert self.config.hidden_size == self.hidden_size, f"Expected hidden size {self.hidden_size}, got {self.config.hidden_size}"
         assert self.config.intermediate_size == self.intermediate_size, f"Expected intermediate size {self.intermediate_size}, got {self.config.intermediate_size}"
         
-        print(f"✅ Model loaded successfully in FULL PRECISION!")
+        print(f"✅ Model loaded successfully (using model default precision)")
         print(f"📋 Verified architecture: {self.num_layers} layers, {self.hidden_size}d hidden, {self.intermediate_size}d intermediate")
-        print(f"🎯 Model dtype: {next(self.model.parameters()).dtype} (avoiding quantization)")
+        # Store actual model dtype for downstream metadata
+        self.model_dtype = next(self.model.parameters()).dtype
+        print(f"🎯 Model dtype: {self.model_dtype} (model default)")
         
         # Verify we have full precision weights
         sample_weight = self.model.layers[0].mlp.down_proj.weight.data
@@ -170,9 +171,9 @@ class GemmaCandidateVectorExtractor:
                 "total_candidates": self.total_candidates,
                 "vector_dimension": self.hidden_size,  # Each column has hidden_size dimensions
                 "extraction_method": "mlp_down_proj_weights",
-                "precision": "float32_full_precision",  # Document precision used
-                "quantization_disabled": True,  # Explicitly disabled quantization
-                "model_dtype": "torch.float32"  # Model loaded in full precision
+                "precision": "model_default",  # Do not force precision; use model default
+                "quantization_disabled": True,  # Explicitly disabled quantization flags
+                "model_dtype": str(getattr(self, "model_dtype", "unknown"))  # Actual model parameter dtype
             },
             "vectors": {},
             "layer_info": {}
@@ -188,8 +189,8 @@ class GemmaCandidateVectorExtractor:
             # Extract each COLUMN as a candidate vector from down_proj matrix
             # Each column is a candidate vector vℓi
             for col_idx in range(self.intermediate_size):  # 6912 columns
-                # Keep full precision by avoiding unnecessary type conversions
-                vector = weight_matrix[:, col_idx].numpy()  # Already float32 from model
+                # Convert column to numpy using the tensor's dtype (model default)
+                vector = weight_matrix[:, col_idx].numpy()
                 
                 # Verify we maintain full precision
                 if col_idx == 0 and layer_idx == self.target_layers[0]:  # First vector
@@ -249,11 +250,11 @@ class GemmaCandidateVectorExtractor:
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        # 3. Save vectors as numpy arrays for efficient loading (maintain full precision)
+        # 3. Save vectors as numpy arrays for efficient loading (preserve original precision)
         vectors_array = np.array([
             candidate_db["vectors"][key]["vector"] 
             for key in sorted(candidate_db["vectors"].keys())
-        ], dtype=np.float32)  # Maintain float32 precision
+        ])  # No dtype forcing - preserve original precision
         
         # Verify precision preservation
         total_unique = len(np.unique(vectors_array))

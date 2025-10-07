@@ -19,9 +19,14 @@ Optional env:
 import os
 import json
 import re
+import unicodedata
+import warnings
 from typing import List, Dict, Any, Optional
 
 import torch
+import tempfile
+import atexit
+import shutil
 # Ensure private Hugging Face cache is set before importing transformers
 PRIVATE_HF_HOME = "/media/hdd/usr/martinelli/.cache/huggingface"
 os.environ["HF_HOME"] = PRIVATE_HF_HOME
@@ -31,6 +36,11 @@ HF_TOKEN = os.getenv("HF_TOKEN", None)
 if not HF_TOKEN:
     raise ValueError("Please set the HF_TOKEN environment variable with your HuggingFace token")
 os.environ["HF_TOKEN"] = HF_TOKEN
+
+# Reduce Transformers verbosity and ignore common transformers UserWarning messages
+# This suppresses messages like: "The following generation flags are not valid and may be ignored"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -73,7 +83,7 @@ def load_prompt_template(path: str) -> str:
 def generate_questions_for_concept(tokenizer, model, prompt_template: str, concept: str, max_new_tokens: int = 400) -> Optional[Dict[str, Any]]:
     """Generate questions-only JSON for a specific concept using the prompt template.
 
-    The prompt template should request a JSON object with keys: concept, category, qa (list of objects with only 'q').
+    The prompt template should request a JSON object with keys: concept and qa (list of objects with only 'q').
     """
     # Substitute concept name in the template
     prompt = prompt_template.replace("{CONCEPT_NAME}", concept)
@@ -110,24 +120,34 @@ def generate_questions_for_concept(tokenizer, model, prompt_template: str, conce
                 cleaned_response = cleaned_response[:-3]
             cleaned_response = cleaned_response.strip()
 
-            json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-                parsed_json = json.loads(json_str)
+            # Accept common variants the model emits, such as:
+            # q: Question
+            # q": Question
+            # "q": "Question"
+            lines = [ln.strip() for ln in cleaned_response.splitlines() if ln.strip()]
 
-                # Validate the structure: concept, category, qa list (qa entries may only have 'q')
-                if (isinstance(parsed_json, dict) and
-                    "concept" in parsed_json and
-                    "category" in parsed_json and
-                    "qa" in parsed_json and
-                    isinstance(parsed_json["qa"], list)):
-                    return parsed_json
-                else:
-                    print(f"  ⚠️ Invalid JSON structure for {concept}")
-                    return None
-            else:
-                print(f"  ⚠️ No JSON found in response for {concept}")
+            extracted = []
+            for ln in lines:
+                m = re.match(r'^\s*["\']?q["\']?\s*:\s*(.*)$', ln, flags=re.IGNORECASE)
+                if m:
+                    qtext = m.group(1).strip()
+                    # Strip surrounding quotes/backticks and trailing punctuation
+                    if (qtext.startswith('"') and qtext.endswith('"')) or (qtext.startswith("'") and qtext.endswith("'")):
+                        qtext = qtext[1:-1].strip()
+                    qtext = qtext.strip('` \t\r\n')
+                    # Remove markdown italics/bold markers
+                    qtext = qtext.strip('*_')
+                    extracted.append(qtext)
+
+            if len(extracted) != 3:
+                print(f"  ⚠️ Expected exactly 3 'q' entries for {concept}, found {len(extracted)}. Response preview:\n{cleaned_response[:400]}")
                 return None
+
+            parsed_json = {
+                "concept": concept,
+                "qa": [{"q": q} for q in extracted]
+            }
+            return parsed_json
 
         except json.JSONDecodeError as e:
             print(f"  ⚠️ JSON parse error for {concept}: {e}")
@@ -144,16 +164,18 @@ def answer_single_question(tokenizer, model, concept: str, question: str, max_ne
 
     Returns the answer as plain text.
     """
-    answer_prompt = (
-        f"{question}\n"
-    )
-
-    messages = [{"role": "user", "content": answer_prompt}]
+    # Create proper message format for Gemma 3 (system instruction + user question)
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant. Answer questions directly, without hedging or prefacing your response."
+        },
+        {"role": "user", "content": question}
+    ]
 
     gen_kwargs = {
         "max_new_tokens": max_new_tokens,
         "do_sample": False,
-        "temperature": 0.0,
     }
 
     inputs = tokenizer.apply_chat_template(
@@ -173,23 +195,40 @@ def answer_single_question(tokenizer, model, concept: str, question: str, max_ne
 
 
 def main(concepts_path: str = CONCEPTS_FILE, prompt_path: str = PROMPT_FILE, out_path: str = DEFAULT_OUTPUT):
-    print(f"🔄 Loading model: {MODEL_ID}")
+    # Load two models: one for question generation (larger) and one for answering (smaller)
+    QA_MODEL_ID = os.environ.get("GEMMA_Q_MODEL", "google/gemma-3-4b-it")
+    ANS_MODEL_ID = os.environ.get("GEMMA_A_MODEL", "google/gemma-3-1b-it")
+    print(f"🔄 Loading models: questions={QA_MODEL_ID}, answers={ANS_MODEL_ID}")
     device = "cuda:1" if torch.cuda.is_available() else "cpu"
     # Use full precision to avoid quantization issues
-    dtype = torch.float32  # Always use full precision
+    dtype = torch.bfloat16  # Always use full precision
+    # Create separate ephemeral HF caches to force fresh downloads per model
+    temp_cache_q = tempfile.mkdtemp(prefix="hf_gemma_q_cache_")
+    temp_cache_a = tempfile.mkdtemp(prefix="hf_gemma_a_cache_")
+    atexit.register(lambda: shutil.rmtree(temp_cache_q, ignore_errors=True))
+    atexit.register(lambda: shutil.rmtree(temp_cache_a, ignore_errors=True))
+    print(f"  🔄 Using temporary HF caches: questions={temp_cache_q}, answers={temp_cache_a}")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=os.environ.get("HF_TOKEN") or None)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+    # Load tokenizer + model for question generation (larger model) only
+    tokenizer_q = AutoTokenizer.from_pretrained(
+        QA_MODEL_ID,
+        token=os.environ.get("HF_TOKEN") or None,
+        cache_dir=temp_cache_q,
+        force_download=True,
+        local_files_only=False,
+    )
+
+    model_q = AutoModelForCausalLM.from_pretrained(
+        QA_MODEL_ID,
         torch_dtype=dtype,
         trust_remote_code=True,
         token=os.environ.get("HF_TOKEN") or None,
-        # Explicitly disable quantization
-        load_in_8bit=False,
-        load_in_4bit=False,
-        quantization_config=None
+        cache_dir=temp_cache_q,
+        force_download=True,
+        local_files_only=False,
     ).to(device).eval()
-    print(f"✅ Loaded on {device} with full precision ({dtype})")
+
+    print(f"✅ Loaded question model on {device}: {QA_MODEL_ID}")
 
     # Load concepts and prompt template
     concepts = load_concepts(concepts_path)
@@ -203,18 +242,49 @@ def main(concepts_path: str = CONCEPTS_FILE, prompt_path: str = PROMPT_FILE, out
     total = len(concepts)
     for i, concept in enumerate(concepts, 1):
         print(f"[{i}/{total}] 🔄 Generating questions for: {concept}")
-        q_data = generate_questions_for_concept(tokenizer, model, prompt_template, concept)
+        q_data = generate_questions_for_concept(tokenizer_q, model_q, prompt_template, concept)
         if q_data:
             questions_only.append(q_data)
             print(f"  ✅ Generated {len(q_data.get('qa', []))} questions for {concept}")
         else:
             print(f"  ❌ Failed to generate questions for {concept}")
 
+    # Done generating questions — free question model to reduce memory usage
+    try:
+        del model_q
+        del tokenizer_q
+    except Exception:
+        pass
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Load tokenizer + model for answer generation (smaller model)
+    tokenizer_a = AutoTokenizer.from_pretrained(
+        ANS_MODEL_ID,
+        token=os.environ.get("HF_TOKEN") or None,
+        cache_dir=temp_cache_a,
+        force_download=True,
+        local_files_only=False,
+    )
+
+    model_a = AutoModelForCausalLM.from_pretrained(
+        ANS_MODEL_ID,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+        token=os.environ.get("HF_TOKEN") or None,
+        cache_dir=temp_cache_a,
+        force_download=True,
+        local_files_only=False,
+    ).to(device).eval()
+
+    print(f"✅ Loaded answer model on {device}: {ANS_MODEL_ID}")
+
     # Phase 2: answer each question with one prompt per question
     final_results: List[Dict[str, Any]] = []
     for qobj in questions_only:
         concept = qobj.get("concept")
-        category = qobj.get("category")
         qa_list = qobj.get("qa", [])
         answered_qa = []
 
@@ -233,13 +303,12 @@ def main(concepts_path: str = CONCEPTS_FILE, prompt_path: str = PROMPT_FILE, out
                 print(f"  ⚠️ Skipping empty question at index {qi}")
                 continue
             print(f"  [{qi}/{len(qa_list)}] Q: {question_text}")
-            answer_text = answer_single_question(tokenizer, model, concept, question_text)
+            answer_text = answer_single_question(tokenizer_a, model_a, concept, question_text)
             print(f"    A: {answer_text[:120]}{'...' if len(answer_text) > 120 else ''}")
             answered_qa.append({"q": question_text, "a": answer_text})
 
         final_results.append({
             "concept": concept,
-            "category": category,
             "qa": answered_qa
         })
 

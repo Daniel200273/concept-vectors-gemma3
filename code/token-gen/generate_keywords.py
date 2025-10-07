@@ -89,7 +89,8 @@ def load_model_and_tokenizer():
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             cache_dir=cache_dir,
-            torch_dtype=torch.float32,  # Use full precision
+            # Use native bfloat16 when available; do not force float32
+            torch_dtype=torch.bfloat16,
             device_map=device_map,      # Use selected GPU or auto-select
             low_cpu_mem_usage=True,     # Reduce CPU memory usage during loading
             trust_remote_code=True,     # Allow custom code if needed

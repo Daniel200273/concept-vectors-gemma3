@@ -1,36 +1,17 @@
-You are an expert in computational linguistics and concept identification. I need you to generate exactly 15 of the MOST IMPORTANT tokens/keywords that are closely related to the concept "{CONCEPT_NAME}".
+You are a helpful, respectful and honest assistant.
+For the concept {CONCEPT_NAME}, generate only a 1–2 sentence description and exactly 15 single-word tokens. Each token must be fully present in a standard LLM vocabulary (not split), must be strongly and uniquely associated with the concept, and must be essential for identifying the concept in computational analyses.
 
-CRITICAL REQUIREMENT: All tokens must exist as single tokens in a standard large language model vocabulary. Generate only real words that would be present as individual tokens in typical LLM tokenizers. EXACTLY 15 UNIQUE TOKENS.
+KEYWORDS Requirements:
+- Select exactly 15 single-word tokens most central and distinctive to the concept.
+- Each token must be a real, common English word present as a single vocabulary item in standard LLM tokenizers (not split).
+- Prioritize tokens that are essential and diagnostic for uniquely identifying the concept.
+- Exclude generic or weakly related terms—focus on those strongly and directly linked to the concept’s core meaning and usage.
 
-PURPOSE: These keywords will be used to identify and score how strongly different neural network components relate to this concept through computational analysis.
-
-Requirements:
-
-1. Generate EXACTLY 15 unique tokens that are MOST STRONGLY associated with the concept
-2. Each token must be a SINGLE WORD, not a phrase (e.g., "Harry" not "Harry Potter")
-3. Each token must be a single vocabulary item (not split by tokenizer)
-4. Prioritize only the MOST CENTRAL tokens to the concept's meaning and usage
-5. Include only tokens that are absolutely essential to identify this concept
-6. Focus on tokens that would BEST distinguish this concept from other concepts
-7. Select only the highest-quality, most diagnostic tokens
-
-Token Selection Guidelines:
-
-- Select ONLY the 15 most strongly and directly related tokens to the concept
-- Include the most essential concept references and core terminology
-- Choose tokens that are most diagnostic and distinctive for this concept
-- Avoid generic or weakly related terms - focus on highly specific, important tokens
-- Use only real, common words that would exist in standard language model vocabularies
-
-CRITICAL OUTPUT FORMAT:
-Respond with EXACTLY this format and nothing else:
-
-CONCEPT DESCRIPTION: [Write a brief 1-2 sentence description of what "{CONCEPT_NAME}" is]
-
-KEYWORDS: [
-"token1", "token2", "token3", ... (exactly 15 tokens)
-]
+NOTE: For CONCEPT DESCRIPTION , if the the concept is a famous person, mention some of his/her works.
 
 Concept to process: "{CONCEPT_NAME}"
 
-Remember: These 15 tokens should be the most essential, diagnostic, and important words for identifying this concept in neural network analysis.
+Respond with EXACTLY this format and nothing else:
+
+CONCEPT DESCRIPTION: [Write a brief 1-2 sentence description of "{CONCEPT_NAME}"]
+KEYWORDS: ["token1", "token2", "token3", ... (exactly 15 tokens)]

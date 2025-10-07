@@ -59,7 +59,8 @@ class FullVocabularyEmbeddingExtractor:
         # Load model with full precision
         self.model = AutoModel.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float32,  # Use full precision
+            # Use native bfloat16 when available; do not force full float32
+            torch_dtype=torch.bfloat16,
             device_map=self.device,
             trust_remote_code=True,
             # Explicitly disable quantization

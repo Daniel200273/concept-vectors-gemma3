@@ -14,92 +14,104 @@ The goal is to identify vectors formed by parameters in the model's MLP layers t
 
 ## Gemma-3 1B Architecture
 
-### Key Characteristics for Concept Discovery
+# Concept Vectors — Gemma-3 (1B)
 
-| Component | Specification | Relevance |
-|-----------|---------------|-----------|
-| **Layers** | 26 transformer blocks | Concept vectors emerge at different abstraction levels |
-| **Hidden Size** | 1152 dimensions | Vector space dimensionality for concept directions |
-| **MLP Dimension** | 6912 (6×hidden) | Intermediate representations in feed-forward networks |
-| **Attention Heads** | 8 heads | Multi-aspect attention but MLPs are our focus |
-| **Vocabulary Size** | ~256k tokens | Large vocabulary for diverse concept expression |
-| **Parameter Count** | ~1B parameters | Compact model allowing efficient experimentation |
+> Disclaimer: the python executables in this repository configure a local Hugging Face cache and expect a personal Hugging Face token available in the environment (HF_TOKEN). 
 
-### Target Architecture Components
+![Automated pipeline](images/automated-pipeline.png)
 
-- **MLP Down-Projection Layers**: `model.layers[i].mlp.down_proj.weight` (6912 → 1152)
-  - These layers compress high-dimensional MLP activations back to residual stream
-  - Hypothesized to contain concept-specific directions as column vectors
-  - Total candidate vectors: 26 layers × 6912 vectors = 179,712 candidates
-- **Token Embeddings**: `model.embed_tokens.weight` (256k × 1152)
-  - Used for projecting concept vectors to measure vocabulary activation patterns
+ # Concept Vectors — Gemma-3 (1B)
 
-## Methodology
+Concise, runnable README for extracting and validating interpretable concept directions from Gemma-3 intermediate activations.
 
-### 1. Vector Extraction
-- Extract column vectors from MLP down-projection weights across all 26 layers
-- Each column represents a potential concept direction in the 1152-dimensional space
+Quick summary
+- Extract column vectors from MLP down-projection layers.
+- Project those vectors to the token embedding matrix to find high-activating tokens.
+- Validate candidate directions with causal interventions (noise injection) and targeted QA/adversarial tests.
 
-### 2. Concept Projection
-- Project extracted vectors onto the full vocabulary embedding matrix
-- Identify tokens that activate most strongly for each candidate vector
-- Filter candidates based on concept-specific activation patterns
+Minimum setup
+1. Create a Python environment and install dependencies:
+```bash
+pip install -r requirements.txt
+```
+2. Export Hugging Face token (required for model downloads):
+```bash
+export HF_TOKEN=your_token_here
+```
 
-### 3. Validation
-- Apply Gaussian noise to promising concept vectors
-- Measure performance degradation on concept-related vs. unrelated tasks
-- Concept-specific vectors should show selective degradation
+Run the full pipeline
+```bash
+python code/run_complete_pipeline.py
+```
+This runs the end-to-end flow (token generation → projection → ranking → validation). Use `--help` on the script for options.
 
-## Key Results
+Run individual phases
+- Token generation (candidate concepts / keywords):
+   - Main: `code/token-gen/generate_keywords.py`
+   - Test harness: `code/token-gen/test_generation.py`
+   - Example:
+      ```bash
+      python code/token-gen/generate_keywords.py --out token-results/keywords.json
+      ```
+- Projection and ranking (project candidates onto embeddings and rank tokens):
+   - Main: `code/projection/run_pipeline.py`
+   - Utilities: `code/projection/extract_candidate_vectors.py`, `code/projection/project_and_rank_gpu_final.py`
+   - Example (GPU recommended for large vocabularies):
+      ```bash
+      python code/projection/run_pipeline.py --layer 12 --out projection/results_layer12.json
+      ```
+- Validation (causal interventions, QA-based tests, specificity scoring):
+   - Main: `code/concept-val-test/ensemble_concept_validation_layerwise.py`
+   - Supporting scripts: `code/concept-val-test/generate-qa-baseline.py`, `code/concept-val-test/advanced_concept_validation.py`
+   - Example:
+      ```bash
+      python code/concept-val-test/ensemble_concept_validation_layerwise.py --candidates token-results/keywords.json
+      ```
+- Adversarial / jailbreak testing:
+   - Main: `code/jailbreak-test/run_jailbreak_test.py`
+   - Helpers: `code/jailbreak-test/ask_adhoc_question.py`
+   - Example:
+      ```bash
+      python code/jailbreak-test/run_jailbreak_test.py --input jailbreak-test/crafted-jailbreak.txt
+      ```
 
-- **Concept Specificity**: Validated vectors show 10-30% higher degradation on concept-related tasks
-- **Layer Distribution**: Most effective concept vectors found in layers 10-20 (middle-to-late layers)
-- **Activation Patterns**: Strong concept vectors activate 50-200 highly relevant vocabulary tokens
+Plotting and analysis
+- Plot utilities live in `code/concept-val-test/` and include `plot_validation_results.py`, `plot_batch.py`, `plot_3d_specificities.py` (each has a `__main__` entry).
 
-## Project Structure
-
+Project structure (main executables shown)
 ```
 code/
-├── projection/              # Vector extraction and ranking
-│   ├── extract_candidate_vectors.py
-│   ├── project_and_rank_v2.py
-│   └── run_pipeline.py
-├── concept_val_test/        # Validation experiments
-│   └── advanced_concept_validation.py
-├── token-gen/              # Concept definitions and vocabularies
-└── concept-val/            # QA generation and testing
-```
+├─ run_complete_pipeline.py                 # main: full end-to-end runner
+├─ projection/
+│  ├─ run_pipeline.py                       # main: projection & ranking driver
+│  ├─ extract_candidate_vectors.py          # helper: extract column vectors from model weights
+│  ├─ project_and_rank_gpu_final.py         # helper: GPU projection & ranking
+│  └─ ...
+├─ concept-val-test/
+│  ├─ ensemble_concept_validation_layerwise.py  # main: validation ensemble & specificity scoring
+│  ├─ advanced_concept_validation.py            # helper: advanced validation experiments
+│  ├─ generate-qa-baseline.py                   # helper: create QA baselines
+│  ├─ plot_validation_results.py                # main: plotting & summary
+│  └─ plot_batch.py                              # main: batch plotting utilities
+├─ jailbreak-test/
+│  ├─ run_jailbreak_test.py                # main: adversarial / jailbreak runner
+│  └─ ask_adhoc_question.py                 # helper: single question runner
+├─ token-gen/
+│  ├─ generate_keywords.py                  # main: token / keyword generation
+│  ├─ validate_keywords.py                  # helper: validate generated keywords
+│  └─ test_generation.py                    # test: token generation examples
+└─ concept-val/                              # QA generation + validation configs
 
-## Setup
+Notes
+- Most heavy steps (projection over full vocab) benefit from a GPU and enough RAM/disk for intermediate files (`code/projection/extracted_vectors/`, `code/projection/full_vocabulary_embeddings/`).
+- Use `--help` on each script for available flags and paths.
 
-1. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+References
+- See `code/` for runnable scripts and `code/projection/` for the extraction + projection implementation.
 
-2. **Set HuggingFace token**:
-   ```bash
-   export HF_TOKEN=your_token_here
-   ```
-   See [SETUP.md](SETUP.md) for detailed instructions.
+If you'd like, I can also:
+- Add short README snippets inside each subfolder showing the typical command for that component.
+- Create a small Makefile / top-level CLI wrapper to run phases selectively.
 
-3. **Run the pipeline**:
-   ```bash
-   cd code/projection
-   python run_pipeline.py
-   ```
-
-## Validation Results
-
-The validation framework tests concept vectors by injecting Gaussian noise and measuring:
-- **BLEU scores** between original and perturbed outputs
-- **ROUGE-L scores** for semantic similarity
-- **Concept specificity** (higher degradation on concept-related vs. unrelated questions)
-
-Example results show concept vectors achieving 60-80% specificity rates with clear causal effects on model behavior.
-
-## References
-
-- [ConceptVectors: Human-Interpretable Concept Directions](https://github.com/yihuaihong/ConceptVectors)
-- [Gemma-3 Model Documentation](https://huggingface.co/google/gemma-3-1b-it)
-- [Locating and Editing Factual Associations in GPT](https://arxiv.org/abs/2202.05262)
+---
+Concise README updated to show the pipeline image, corrected runnable commands, and main executables for each component.

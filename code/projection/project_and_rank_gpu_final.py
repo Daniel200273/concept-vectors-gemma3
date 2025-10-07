@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
 """
-GPU-Enhanced Concept Value Vector Analysis (Configurable Layer Range)
+GPU-Enhanced Layer-wise Concept Value Vector Analysis (Configurable Layer Range)
 
-This script provides a GPU-accelerated version of concept vector analysis.
+This script provides a GPU-accelerated layer-wise analysis of concept vectors.
 Uses CUDA/GPU acceleration for the most computationally intensive parts.
 
 Configuration:
-- TARGET_LAYER_START: First MLP layer to analyze (default: 14)
-- TARGET_LAYER_END: Last MLP layer to analyze (default: 22)
+- TARGET_LAYER_START: First MLP layer to analyze (default: 1)
+- TARGET_LAYER_END: Last MLP layer to analyze (default: 26)
 
-Key optimizations:
-1. Batch matrix multiplication on GPU (E_C @ V_batch)
-2. GPU tensor operations for statistical computations
-3. Efficient memory management with CUDA streams
-4. Vectorized group score computations
+Key Features:
+1. Layer-wise vector evaluation: Each candidate vector scored individually
+2. Best layer selection: Analyzes top 100 vectors per layer, finds 5 best layers by mean activation
+3. Final selection: 100 vectors × 5 best layers = 500 vectors per concept
+4. GPU acceleration for batch matrix multiplication and statistical computations
+5. Efficient memory management with CUDA streams
+6. Detailed layer analysis with comprehensive statistics
 
 Process:
 1. Load candidate vectors (value vectors from MLP down_proj columns, configurable layers) 
 2. Load token embeddings (for concept tokens)
-3. GPU-accelerated batch computation of token activation scores
-4. Simple ranking by sum of all concept token activation scores
-5. Select top-k candidates for each concept
-6. Save results with detailed analysis
+3. Score ALL candidate vectors using GPU-accelerated batch computation
+4. Organize vectors by layer and find top 100 per layer
+5. Rank layers by mean activation score of their top 100 vectors
+6. Select 5 best layers and their top 100 vectors each (500 total per concept)
+7. Save comprehensive results with layer-wise analysis
 
 Mathematical approach (vectorized):
 - Concept token embeddings: E_C = [e1, e2, ..., en] (n_concept_tokens x d)
 - Batch candidate vectors: V_batch = [v1, v2, ..., vk] (k x d)
-- Batch scores: R_batch = E_C @ V_batch^T (n_concept_tokens x k)
-- Ranking score: sum(concept_group_scores) for maximum concept activation strength
+- Batch scores: R_batch = normalize(E_C) @ normalize(V_batch)^T (n_concept_tokens x k)
+- Layer ranking: mean(top_100_cosine_scores) per layer
+- Final selection: top 100 vectors from each of 5 best layers
 """
 
 import numpy as np
@@ -50,12 +54,21 @@ from tqdm import tqdm
 
 
 # Global configuration for target MLP layers
-TARGET_LAYER_START = 1  # First layer to include (inclusive)
+TARGET_LAYER_START = 13  # First layer to include (inclusive)
 TARGET_LAYER_END = 26    # Last layer to include (inclusive)
 TARGET_LAYERS = list(range(TARGET_LAYER_START, TARGET_LAYER_END + 1))
 
 class ConceptVectorProjectorGPU:
-    """GPU-accelerated analyze value vectors by computing token activation scores for concepts"""
+    """GPU-accelerated layer-wise analysis of value vectors by computing token activation scores for concepts
+    
+    This class implements a sophisticated layer-wise analysis approach:
+    1. Scores every candidate vector individually for each concept
+    2. Groups vectors by layer and finds top performers per layer
+    3. Ranks layers by mean activation score of their top 100 vectors
+    4. Selects 5 best layers and their top 100 vectors (500 total per concept)
+    
+    The analysis provides comprehensive statistics and detailed layer comparisons.
+    """
     
     def __init__(self, candidate_vectors_dir: str, token_embeddings_dir: str, device: str = "cuda:1"):
         """
@@ -127,8 +140,10 @@ class ConceptVectorProjectorGPU:
         print(f"  📊 Vector shape: {self.candidate_vectors.shape}")
         
         # Convert to GPU tensor for efficient computation
-        self.candidate_vectors_gpu = torch.from_numpy(self.candidate_vectors).float().to(self.device)
-        print(f"  🚀 Moved vectors to {self.device}")
+        # Convert to GPU tensor for efficient computation without forcing dtype
+        self.candidate_vectors_dtype = self.candidate_vectors.dtype
+        self.candidate_vectors_gpu = torch.from_numpy(self.candidate_vectors).to(self.device)
+        print(f"  🚀 Moved vectors to {self.device} (dtype={self.candidate_vectors_gpu.dtype})")
         # Diagnostics: vector norms and dtype
         try:
             vecs_cpu = self.candidate_vectors
@@ -227,34 +242,41 @@ class ConceptVectorProjectorGPU:
                                         batch_vectors_gpu: torch.Tensor,
                                         normalize: bool = True) -> Tuple[torch.Tensor, Dict]:
         """
-        GPU-accelerated computation of concept token scores for a batch of vectors
+        GPU-accelerated computation of concept token scores using direct cosine similarity
+        
+        Uses the same approach as project_and_rank_gpu.py: direct normalized dot product
+        between concept embeddings and candidate vectors for robust ranking.
         
         Args:
-            concept_embeddings_gpu: Concept token embeddings (n_tokens x d) on GPU
-            batch_vectors_gpu: Batch of value vectors (batch_size x d) on GPU
+            concept_embeddings_gpu: Concept token embeddings (n_tokens x d) on GPU  
+            batch_vectors_gpu: Batch of concept vectors (batch_size x d) on GPU
+            normalize: Whether to L2-normalize for cosine similarity (default: True)
             
         Returns:
             Tuple of (batch_scores_gpu, batch_stats) where:
-            - batch_scores_gpu: Token scores (n_tokens x batch_size) on GPU
+            - batch_scores_gpu: Cosine similarity scores (n_tokens x batch_size) on GPU
             - batch_stats: Dictionary with batch statistics
         """
-        # Optional normalization to remove norm effects and focus on angular similarity
-        if normalize:
-            concept_embeddings_gpu = F.normalize(concept_embeddings_gpu, p=2, dim=1)
-            batch_vectors_gpu = F.normalize(batch_vectors_gpu, p=2, dim=1)
+        # L2-normalize embeddings for cosine similarity (removes norm effects)
+            # Capture dtype for metadata
+        self.token_embeddings_dtype = self.token_embeddings.dtype
+        print(f"  🔎 Token embeddings: dtype={self.token_embeddings_dtype}")
+        concept_embeddings_gpu = F.normalize(concept_embeddings_gpu, p=2, dim=1)
+        batch_vectors_gpu = F.normalize(batch_vectors_gpu, p=2, dim=1)
 
-        # Batch matrix multiplication: E_C @ V_batch^T
-        # Shape: (n_concept_tokens, batch_size)
+        # Direct batch matrix multiplication: E_C @ V_batch^T
+        # Shape: concept_embeddings_gpu (n_concept_tokens x d) @ batch_vectors_gpu^T (d x batch_size)
+        # Result: (n_concept_tokens x batch_size)
         batch_scores = torch.mm(concept_embeddings_gpu, batch_vectors_gpu.t())
         
-        # Compute batch statistics on GPU
+        # Compute batch statistics on GPU  
         scores_mean = torch.mean(batch_scores, dim=0)  # (batch_size,)
         scores_std = torch.std(batch_scores, dim=0)    # (batch_size,)
         scores_max = torch.max(batch_scores, dim=0)[0] # (batch_size,)
         scores_min = torch.min(batch_scores, dim=0)[0] # (batch_size,)
         scores_range = scores_max - scores_min         # (batch_size,)
         
-        # Vector norms
+        # Vector norms (before normalization if applied)
         vector_norms = torch.norm(batch_vectors_gpu, dim=1)  # (batch_size,)
         
         batch_stats = {
@@ -263,7 +285,8 @@ class ConceptVectorProjectorGPU:
             "scores_max": scores_max,        # GPU tensor (batch_size,)
             "scores_min": scores_min,        # GPU tensor (batch_size,)
             "scores_range": scores_range,    # GPU tensor (batch_size,)
-            "value_vector_norm": vector_norms # GPU tensor (batch_size,)
+            "value_vector_norm": vector_norms, # GPU tensor (batch_size,)
+            "method": "direct_cosine_similarity"  # Track the method used
         }
         
         return batch_scores, batch_stats
@@ -286,8 +309,9 @@ class ConceptVectorProjectorGPU:
         num_groups = len(group_keys)
         batch_size = batch_scores_gpu.shape[1]
         
-        # Pre-allocate tensors on GPU
-        group_scores = torch.empty(num_groups, batch_size, device=self.device, dtype=torch.float32)
+        # Pre-allocate tensors on GPU. Match score dtype to incoming batch_scores dtype
+        score_dtype = batch_scores_gpu.dtype
+        group_scores = torch.empty(num_groups, batch_size, device=self.device, dtype=score_dtype)
         best_token_indices = torch.empty(num_groups, batch_size, device=self.device, dtype=torch.long)
         
         # Compute group scores (sum over group members for each vector in batch)
@@ -310,16 +334,16 @@ class ConceptVectorProjectorGPU:
         
         return group_scores, best_token_indices
     
-    def analyze_concept_value_vectors_gpu(self, concept_name: str, top_k: int = 50) -> Dict:
+    def analyze_concept_value_vectors_gpu(self, concept_name: str, top_k: int = 100) -> Dict:
         """
-        GPU-accelerated analysis of value vectors for a specific concept
+        GPU-accelerated layer-wise analysis of value vectors for a specific concept
         
         Args:
             concept_name: Name of the concept to analyze
-            top_k: Number of top candidates to return
+            top_k: Number of top candidates per layer (default: 100)
             
         Returns:
-            Dictionary with analysis results
+            Dictionary with layer-wise analysis results and best 5 layers
         """
         print(f"  🔍 Analyzing concept: {concept_name}")
         
@@ -346,8 +370,8 @@ class ConceptVectorProjectorGPU:
         if not concept_tokens:
             return {"error": f"No valid token strings found for concept '{concept_name}' token IDs"}
         
-        # Get concept embeddings and move to GPU
-        concept_embeddings_gpu = torch.from_numpy(concept_embeddings).float().to(self.device)
+        # Get concept embeddings and move to GPU (preserve original dtype)
+        concept_embeddings_gpu = torch.from_numpy(concept_embeddings).to(self.device)
         
         # Create token groups
         group_map, group_keys = self.create_token_groups(concept_tokens)
@@ -355,9 +379,24 @@ class ConceptVectorProjectorGPU:
         
         print(f"    📊 {len(concept_tokens)} concept tokens in {num_groups} groups")
         
+        # Layer-wise analysis: organize vectors by layer
+        layer_to_vector_indices = {}
+        layer_pattern = re.compile(r"L(\d+)_C\d+")
+        
+        for vector_idx_str, vector_key in self.vector_index_mapping.items():
+            match = layer_pattern.match(vector_key)
+            if match:
+                layer = int(match.group(1))
+                if layer not in layer_to_vector_indices:
+                    layer_to_vector_indices[layer] = []
+                layer_to_vector_indices[layer].append(int(vector_idx_str))
+        
+        print(f"    🔍 Found vectors across {len(layer_to_vector_indices)} layers: {sorted(layer_to_vector_indices.keys())}")
+        
         # GPU batch processing
         batch_size = 4000  # Larger batch size for GPU
         n_candidates = self.candidate_vectors_gpu.shape[0]
+        
         # Sanity checks: dimension agreement between concept embeddings and candidate vectors
         if concept_embeddings.shape[1] != self.candidate_vectors_gpu.shape[1]:
             raise RuntimeError(f"Dimension mismatch: concept embeddings dim={concept_embeddings.shape[1]} vs candidate vectors dim={self.candidate_vectors_gpu.shape[1]}")
@@ -377,11 +416,13 @@ class ConceptVectorProjectorGPU:
             print(f"  🔎 Example single token · vector = {sample_dot:.6f}")
         except Exception:
             pass
-        analysis_results = []
+            
+        # Step 1: Compute scores for ALL vectors
+        all_vector_results = []
         
         print(f"    🚀 Processing {n_candidates:,} candidates in batches of {batch_size}")
         
-        for i in tqdm(range(0, n_candidates, batch_size), desc=f"    GPU batches"):
+        for i in tqdm(range(0, n_candidates, batch_size), desc=f"    Computing scores"):
             batch_end = min(i + batch_size, n_candidates)
             current_batch_size = batch_end - i
             
@@ -401,105 +442,158 @@ class ConceptVectorProjectorGPU:
             # Simple ranking metric: sum of all concept token activation scores
             concept_activation_strength = torch.sum(group_scores_gpu, dim=0)  # (current_batch_size,)
             
-            # Keep other metrics for analysis but don't use in ranking
-            all_group_mean = torch.mean(group_scores_gpu, dim=0)  # (current_batch_size,)
-            all_group_max = torch.max(group_scores_gpu, dim=0)[0]  # (current_batch_size,)
-            all_group_std = torch.std(group_scores_gpu, dim=0)    # (current_batch_size,)
-            
-            # Selectivity metrics (for analysis only)
-            full_mean = batch_stats["scores_mean"]  # (current_batch_size,)
-            selectivity_ratio = all_group_max / torch.clamp(torch.abs(full_mean), min=0.01)
-            
             # Move results back to CPU for processing
-            group_scores_cpu = group_scores_gpu.cpu().numpy()  # (num_groups x current_batch_size)
-            best_token_indices_cpu = best_token_indices_gpu.cpu().numpy()
             concept_activation_strength_cpu = concept_activation_strength.cpu().numpy()
-            all_group_mean_cpu = all_group_mean.cpu().numpy()
-            all_group_max_cpu = all_group_max.cpu().numpy()
-            all_group_std_cpu = all_group_std.cpu().numpy()
-            selectivity_ratio_cpu = selectivity_ratio.cpu().numpy()
             
-            # Convert batch stats to CPU
-            batch_stats_cpu = {
-                key: tensor.cpu().numpy() for key, tensor in batch_stats.items()
-            }
-            
-            # Process each vector in the batch
+            # Store basic results for each vector
             for j in range(current_batch_size):
                 vector_idx = i + j
                 vector_key = self.vector_index_mapping[str(vector_idx)]
                 
-                # Get scores and indices for this vector
-                vector_group_scores = group_scores_cpu[:, j]  # (num_groups,)
-                vector_best_indices = best_token_indices_cpu[:, j]  # (num_groups,)
-                
-                # Sort groups by score for this vector
-                group_sort_indices = np.argsort(vector_group_scores)[::-1]
-                
-                # Create scoring info for this vector
-                scoring_info = {
-                    "scores_mean": float(batch_stats_cpu["scores_mean"][j]),
-                    "scores_std": float(batch_stats_cpu["scores_std"][j]),
-                    "scores_max": float(batch_stats_cpu["scores_max"][j]),
-                    "scores_min": float(batch_stats_cpu["scores_min"][j]),
-                    "scores_range": float(batch_stats_cpu["scores_range"][j]),
-                    "value_vector_norm": float(batch_stats_cpu["value_vector_norm"][j]),
-                    "concept_embedding_matrix_shape": list(concept_embeddings.shape),
-                    "num_concept_tokens": len(concept_tokens)
-                }
-                
-                # Store result
-                result = {
+                all_vector_results.append({
                     "vector_index": vector_idx,
                     "vector_key": vector_key,
-                    "concept_activation_strength": float(concept_activation_strength_cpu[j]),
-                    "selectivity_ratio": float(selectivity_ratio_cpu[j]),
-                    "concept_specificity": float(all_group_mean_cpu[j] / max(batch_stats_cpu["scores_std"][j], 0.01)),
-                    "all_group_mean": float(all_group_mean_cpu[j]),
-                    "all_group_max": float(all_group_max_cpu[j]),
-                    "all_group_std": float(all_group_std_cpu[j]),
-                    "full_mean": float(batch_stats_cpu["scores_mean"][j]),
-                    "total_groups": num_groups,
-                    "grouping": {"enabled": True, "method": "variant_max", "num_groups": num_groups},
-                    "scoring_info": scoring_info,
-                    # Top groups for this vector
+                    "concept_activation_strength": float(concept_activation_strength_cpu[j])
+                })
+        
+        # Step 2: Layer-wise analysis - find top vectors per layer and compute layer scores
+        layer_analyses = {}
+        layer_scores = {}
+        
+        print(f"    📊 Analyzing layers individually...")
+        
+        for layer, vector_indices in layer_to_vector_indices.items():
+            print(f"      🔍 Analyzing layer {layer} ({len(vector_indices)} vectors)...")
+            
+            # Get results for this layer's vectors
+            layer_results = [r for r in all_vector_results if r["vector_index"] in vector_indices]
+            
+            # Sort by activation strength
+            layer_results.sort(key=lambda x: x["concept_activation_strength"], reverse=True)
+            
+            # Take top 100 (or all if less than 100)
+            top_layer_results = layer_results[:min(top_k, len(layer_results))]
+            
+            # Calculate mean activation score for this layer's top vectors
+            if top_layer_results:
+                layer_mean_activation = np.mean([r["concept_activation_strength"] for r in top_layer_results])
+                layer_scores[layer] = layer_mean_activation
+                
+                layer_analyses[layer] = {
+                    "layer": layer,
+                    "total_vectors": len(layer_results),
+                    "top_vectors_analyzed": len(top_layer_results),
+                    "mean_activation_score": float(layer_mean_activation),
+                    "max_activation_score": float(top_layer_results[0]["concept_activation_strength"]),
+                    "min_activation_score": float(top_layer_results[-1]["concept_activation_strength"]),
+                    "top_vectors": top_layer_results
+                }
+                
+                print(f"        📈 Layer {layer}: mean_activation={layer_mean_activation:.6f}, max={top_layer_results[0]['concept_activation_strength']:.6f}")
+            else:
+                layer_scores[layer] = 0.0
+                layer_analyses[layer] = {
+                    "layer": layer,
+                    "total_vectors": 0,
+                    "top_vectors_analyzed": 0,
+                    "mean_activation_score": 0.0,
+                    "top_vectors": []
+                }
+        
+        # Step 3: Select best 5 layers based on mean activation scores
+        sorted_layers = sorted(layer_scores.items(), key=lambda x: x[1], reverse=True)
+        best_5_layers = sorted_layers[:5]
+        best_layer_numbers = [layer for layer, score in best_5_layers]
+        
+        print(f"    🏆 Best 5 layers selected:")
+        for i, (layer, score) in enumerate(best_5_layers):
+            print(f"      {i+1}. Layer {layer}: mean_activation={score:.6f}")
+        
+        # Step 4: Collect detailed results for best 5 layers (500 total vectors)
+        best_layers_detailed_results = []
+        total_selected_vectors = 0
+        
+        for layer_num in best_layer_numbers:
+            layer_analysis = layer_analyses[layer_num]
+            layer_vectors = layer_analysis["top_vectors"]
+            
+            # Get detailed information for each vector in this layer
+            for vector_result in layer_vectors:
+                vector_idx = vector_result["vector_index"]
+                
+                # Recompute detailed scores for this specific vector
+                vector_gpu = self.candidate_vectors_gpu[vector_idx:vector_idx+1]  # (1 x d)
+                
+                batch_scores_gpu, batch_stats = self.compute_concept_token_scores_gpu(
+                    concept_embeddings_gpu, vector_gpu
+                )
+                
+                group_scores_gpu, best_token_indices_gpu = self.compute_group_scores_gpu(
+                    batch_scores_gpu, group_map, group_keys
+                )
+                
+                # Convert to CPU for detailed processing
+                group_scores_cpu = group_scores_gpu.cpu().numpy()[:, 0]  # (num_groups,)
+                best_token_indices_cpu = best_token_indices_gpu.cpu().numpy()[:, 0]
+                batch_stats_cpu = {key: (tensor.cpu().numpy()[0] if torch.is_tensor(tensor) else tensor) 
+                                  for key, tensor in batch_stats.items()}
+                
+                # Sort groups by score
+                group_sort_indices = np.argsort(group_scores_cpu)[::-1]
+                
+                # Create detailed result
+                detailed_result = {
+                    "vector_index": vector_idx,
+                    "vector_key": vector_result["vector_key"],
+                    "layer": layer_num,
+                    "rank_in_layer": layer_vectors.index(vector_result) + 1,
+                    "concept_activation_strength": vector_result["concept_activation_strength"],
+                    "all_group_mean": float(np.mean(group_scores_cpu)),
+                    "all_group_max": float(np.max(group_scores_cpu)),
+                    "all_group_std": float(np.std(group_scores_cpu)),
+                    "scoring_info": {
+                        "scores_mean": float(batch_stats_cpu["scores_mean"]),
+                        "scores_std": float(batch_stats_cpu["scores_std"]),
+                        "scores_max": float(batch_stats_cpu["scores_max"]),
+                        "scores_min": float(batch_stats_cpu["scores_min"]),
+                        "scores_range": float(batch_stats_cpu["scores_range"]),
+                        "value_vector_norm": float(batch_stats_cpu["value_vector_norm"]),
+                        "num_concept_tokens": len(concept_tokens)
+                    },
                     "top_groups": [
                         {
                             "group_key": group_keys[gidx],
                             "group_size": len(group_map[group_keys[gidx]]),
-                            "best_concept_token_index": int(vector_best_indices[gidx]),
-                            "token_id": concept_tokens[int(vector_best_indices[gidx])][1],  # Get token_id from concept_tokens
-                            "token": concept_tokens[int(vector_best_indices[gidx])][0],    # Get token string from concept_tokens
-                            "score": float(vector_group_scores[gidx])
-                        }
-                        for gidx in group_sort_indices[:min(10, len(group_sort_indices))]
-                    ],
-                    # Back-compat: expose the same top items as tokens list
-                    "top_concept_tokens": [
-                        {
-                            "concept_token_index": int(vector_best_indices[gidx]),
-                            "token_id": concept_tokens[int(vector_best_indices[gidx])][1],  # Get token_id from concept_tokens
-                            "token": concept_tokens[int(vector_best_indices[gidx])][0],    # Get token string from concept_tokens
-                            "score": float(vector_group_scores[gidx])
+                            "best_concept_token_index": int(best_token_indices_cpu[gidx]),
+                            "token_id": concept_tokens[int(best_token_indices_cpu[gidx])][1],
+                            "token": concept_tokens[int(best_token_indices_cpu[gidx])][0],
+                            "score": float(group_scores_cpu[gidx])
                         }
                         for gidx in group_sort_indices[:min(10, len(group_sort_indices))]
                     ]
                 }
                 
-                analysis_results.append(result)
+                best_layers_detailed_results.append(detailed_result)
+                total_selected_vectors += 1
         
-        # Sort by concept activation strength (highest first)
-        analysis_results.sort(key=lambda x: x["concept_activation_strength"], reverse=True)
+        print(f"    ✅ Selected {total_selected_vectors} vectors from best 5 layers")
         
-        # Select top-k results
-        top_results = analysis_results[:top_k]
+        # Compute summary statistics for the layer-wise analysis
+        all_selected_activations = [r["concept_activation_strength"] for r in best_layers_detailed_results]
+        layer_summary_stats = {}
         
-        # Compute summary statistics (same as CPU version)
-        all_group_means = [r["all_group_mean"] for r in analysis_results]
-        all_group_maxes = [r["all_group_max"] for r in analysis_results]
-        all_group_stds = [r["all_group_std"] for r in analysis_results]
-        all_full_means = [r["full_mean"] for r in analysis_results]
-        all_ranges = [r["scoring_info"]["scores_range"] for r in analysis_results]
+        for layer_num in best_layer_numbers:
+            layer_results = [r for r in best_layers_detailed_results if r["layer"] == layer_num]
+            layer_activations = [r["concept_activation_strength"] for r in layer_results]
+            
+            layer_summary_stats[str(layer_num)] = {
+                "layer": layer_num,
+                "num_vectors": len(layer_results),
+                "mean_activation": float(np.mean(layer_activations)),
+                "std_activation": float(np.std(layer_activations)),
+                "max_activation": float(np.max(layer_activations)),
+                "min_activation": float(np.min(layer_activations))
+            }
         
         analysis_summary = {
             "concept_name": concept_name,
@@ -508,22 +602,43 @@ class ConceptVectorProjectorGPU:
                 {"token": self.token_id_to_string.get(tid, f"<UNK:{tid}>"), "token_id": tid}
                 for tid in valid_token_ids
             ],
-            "total_candidates_tested": len(analysis_results),
-            "top_k": top_k,
+            "analysis_method": "layer_wise_top_k_selection",
+            "total_candidates_evaluated": len(all_vector_results),
+            "layers_analyzed": len(layer_analyses),
+            "best_layers_selected": len(best_layer_numbers),
+            "vectors_per_layer": top_k,
+            "total_selected_vectors": total_selected_vectors,
             "grouping": {"enabled": True, "method": "variant_max", "num_groups": num_groups},
-            "statistics": {
-                "max_activation_strength": float(np.max(all_group_means)),
-                "mean_activation_strength": float(np.mean(all_group_means)),
-                "median_activation_strength": float(np.median(all_group_means)),
-                "std_activation_strength": float(np.std(all_group_means)),
-                "max_concept_group_max": float(np.max(all_group_maxes)),
-                "mean_concept_group_std": float(np.mean(all_group_stds)),
-                "max_concept_full_mean": float(np.max(all_full_means)),
-                "mean_concept_score_range": float(np.mean(all_ranges)),
-                "top_k_activation_mean": float(np.mean([r["concept_activation_strength"] for r in top_results])),
-                "ranking_method": "concept_activation_sum_gpu"
+            "best_layers": [
+                {
+                    "rank": i + 1,
+                    "layer": layer,
+                    "mean_activation_score": float(score),
+                    "num_vectors": len([r for r in best_layers_detailed_results if r["layer"] == layer])
+                }
+                for i, (layer, score) in enumerate(best_5_layers)
+            ],
+            "layer_analyses": {
+                str(layer): {
+                    "layer": analysis["layer"],
+                    "total_vectors_in_layer": analysis["total_vectors"],
+                    "top_vectors_selected": analysis["top_vectors_analyzed"],
+                    "mean_activation_score": analysis["mean_activation_score"],
+                    "max_activation_score": analysis.get("max_activation_score", 0.0),
+                    "min_activation_score": analysis.get("min_activation_score", 0.0),
+                    "selected_for_final": layer in best_layer_numbers
+                }
+                for layer, analysis in layer_analyses.items()
             },
-            "top_candidates": top_results,
+            "statistics": {
+                "overall_max_activation_strength": float(np.max(all_selected_activations)) if all_selected_activations else 0.0,
+                "overall_mean_activation_strength": float(np.mean(all_selected_activations)) if all_selected_activations else 0.0,
+                "overall_std_activation_strength": float(np.std(all_selected_activations)) if all_selected_activations else 0.0,
+                "best_layer_mean_scores": [float(score) for _, score in best_5_layers],
+                "layer_summary": layer_summary_stats,
+                "ranking_method": "layer_wise_concept_activation_sum_cosine_gpu"
+            },
+            "selected_vectors": best_layers_detailed_results,
             "concept_embedding_info": {
                 "dimension": concept_embeddings.shape[1],
                 "num_concept_tokens": concept_embeddings.shape[0],
@@ -533,16 +648,16 @@ class ConceptVectorProjectorGPU:
         
         return analysis_summary
     
-    def analyze_all_concepts(self, top_k: int = 50, concept_subset: List[str] = None) -> Dict:
+    def analyze_all_concepts(self, top_k: int = 100, concept_subset: List[str] = None) -> Dict:
         """
-        Analyze value vectors for all concepts (GPU-accelerated)
+        Analyze value vectors for all concepts with layer-wise selection (GPU-accelerated)
         
         Args:
-            top_k: Number of top candidates per concept
+            top_k: Number of top candidates per layer (default: 100)
             concept_subset: List of specific concepts to analyze (None = all)
             
         Returns:
-            Dictionary with all concept analyses
+            Dictionary with all concept analyses (500 vectors per concept from 5 best layers)
         """
         print("🎯 Starting GPU-accelerated concept analysis...")
         
@@ -577,26 +692,52 @@ class ConceptVectorProjectorGPU:
         
         # Compute global statistics
         if successful_analyses:
-            all_max_activations = [a["statistics"]["max_activation_strength"] for a in successful_analyses]
-            all_mean_activations = [a["statistics"]["mean_activation_strength"] for a in successful_analyses]
+            # Collect statistics from layer-wise analyses
+            all_max_activations = [a["statistics"]["overall_max_activation_strength"] for a in successful_analyses]
+            all_mean_activations = [a["statistics"]["overall_mean_activation_strength"] for a in successful_analyses]
+            all_selected_vector_counts = [a["total_selected_vectors"] for a in successful_analyses]
             
-            # Find best performing concept
-            best_concept_idx = np.argmax(all_max_activations)
+            # Find best performing concept based on mean activation
+            best_concept_idx = np.argmax(all_mean_activations)
             best_concept = concepts_to_analyze[best_concept_idx]
+            
+            # Collect layer information across all concepts
+            all_selected_layers = []
+            layer_selection_frequency = {}
+            
+            for analysis in successful_analyses:
+                for layer_info in analysis["best_layers"]:
+                    layer_num = layer_info["layer"]
+                    all_selected_layers.append(layer_num)
+                    layer_selection_frequency[layer_num] = layer_selection_frequency.get(layer_num, 0) + 1
+            
+            # Most frequently selected layers across all concepts
+            most_common_layers = sorted(layer_selection_frequency.items(), key=lambda x: x[1], reverse=True)[:10]
             
             global_statistics = {
                 "total_concepts_analyzed": len(concepts_to_analyze),
                 "successful_concepts": len(successful_analyses),
                 "failed_concepts": len(concepts_to_analyze) - len(successful_analyses),
+                "analysis_method": "layer_wise_top_k_selection",
+                "vectors_per_concept": sum(all_selected_vector_counts) // len(all_selected_vector_counts) if all_selected_vector_counts else 0,
+                "target_vectors_per_concept": 500,  # 5 layers × 100 vectors
+                "layers_per_concept": 5,
+                "vectors_per_layer": top_k,
                 "overall_max_activation_strength": float(np.max(all_max_activations)),
                 "overall_mean_activation_strength": float(np.mean(all_mean_activations)),
                 "best_concept": best_concept,
-                "best_concept_max_activation": float(all_max_activations[best_concept_idx]),
+                "best_concept_mean_activation": float(all_mean_activations[best_concept_idx]),
+                "most_selected_layers": [
+                    {"layer": layer, "selection_frequency": freq, "percentage": freq/len(successful_analyses)*100}
+                    for layer, freq in most_common_layers
+                ],
                 "distribution_stats": {
                     "max_activations_mean": float(np.mean(all_max_activations)),
                     "max_activations_std": float(np.std(all_max_activations)),
                     "mean_activations_mean": float(np.mean(all_mean_activations)),
                     "mean_activations_std": float(np.std(all_mean_activations)),
+                    "selected_vectors_mean": float(np.mean(all_selected_vector_counts)),
+                    "selected_vectors_std": float(np.std(all_selected_vector_counts))
                 },
                 "gpu_acceleration": True,
                 "device_used": str(self.device)
@@ -606,6 +747,7 @@ class ConceptVectorProjectorGPU:
                 "total_concepts_analyzed": len(concepts_to_analyze),
                 "successful_concepts": 0,
                 "failed_concepts": len(concepts_to_analyze),
+                "analysis_method": "layer_wise_top_k_selection",
                 "gpu_acceleration": True,
                 "device_used": str(self.device)
             }
@@ -617,12 +759,14 @@ class ConceptVectorProjectorGPU:
         
         return {
             "metadata": {
-                "analysis_type": "concept_value_vector_analysis_gpu",
+                "analysis_type": "layer_wise_concept_value_vector_analysis_gpu",
                 "target_layers": f"{TARGET_LAYER_START}-{TARGET_LAYER_END}",
-                "ranking_method": "concept_activation_sum_gpu",
+                "ranking_method": "layer_wise_concept_activation_sum_cosine_gpu",
+                "vectors_per_layer": top_k,
+                "layers_selected_per_concept": 5,
+                "total_vectors_per_concept": 500,  # 5 layers × 100 vectors
                 "gpu_accelerated": True,
                 "device": str(self.device),
-                "top_k_per_concept": top_k,
                 "total_concepts_available": len(self.concept_mappings),
                 "concepts_analyzed": len(concepts_to_analyze)
             },
@@ -631,26 +775,28 @@ class ConceptVectorProjectorGPU:
         }
     
     def save_results(self, results: Dict, output_dir: str) -> Dict:
-        """Save analysis results to files (same as CPU version)"""
-        print(f"💾 Saving GPU analysis results to {output_dir}...")
+        """Save layer-wise analysis results to files"""
+        print(f"💾 Saving GPU layer-wise analysis results to {output_dir}...")
         
         os.makedirs(output_dir, exist_ok=True)
         
         # Main results file
-        results_file = os.path.join(output_dir, "projection_gpu_analysis_results.json")
+        results_file = os.path.join(output_dir, "layer_wise_projection_gpu_analysis_results.json")
         with open(results_file, 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
         
         # Summary file
-        summary_file = os.path.join(output_dir, "projection_gpu_summary.json")
+        summary_file = os.path.join(output_dir, "layer_wise_projection_gpu_summary.json")
         summary_data = {
             "metadata": results["metadata"],
             "global_statistics": results["global_statistics"],
             "concept_summary": {
                 concept: {
                     "success": "error" not in analysis,
-                    "max_activation_strength": analysis.get("statistics", {}).get("max_activation_strength", 0),
-                    "total_candidates": analysis.get("total_candidates_tested", 0),
+                    "total_selected_vectors": analysis.get("total_selected_vectors", 0),
+                    "best_layers": [layer_info["layer"] for layer_info in analysis.get("best_layers", [])],
+                    "overall_mean_activation": analysis.get("statistics", {}).get("overall_mean_activation_strength", 0),
+                    "layers_analyzed": analysis.get("layers_analyzed", 0),
                     "num_concept_tokens": analysis.get("num_concept_tokens", 0)
                 }
                 for concept, analysis in results["concept_analyses"].items()
@@ -659,32 +805,60 @@ class ConceptVectorProjectorGPU:
         
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, indent=2, ensure_ascii=False)
+            
+        # Save individual concept vector files for easy access
+        concept_vectors_dir = os.path.join(output_dir, "concept_vectors")
+        os.makedirs(concept_vectors_dir, exist_ok=True)
         
-        print(f"  ✅ Results saved to: {results_file}")
+        concept_files_saved = 0
+        for concept, analysis in results["concept_analyses"].items():
+            if "error" not in analysis and "selected_vectors" in analysis:
+                concept_file = os.path.join(concept_vectors_dir, f"{concept}_vectors.json")
+                concept_data = {
+                    "concept_name": concept,
+                    "metadata": {
+                        "total_vectors": analysis["total_selected_vectors"],
+                        "layers_selected": len(analysis["best_layers"]),
+                        "vectors_per_layer": results["metadata"]["vectors_per_layer"],
+                        "analysis_method": "layer_wise_selection"
+                    },
+                    "best_layers": analysis["best_layers"],
+                    "selected_vectors": analysis["selected_vectors"]
+                }
+                
+                with open(concept_file, 'w', encoding='utf-8') as f:
+                    json.dump(concept_data, f, indent=2, ensure_ascii=False)
+                concept_files_saved += 1
+        
+        print(f"  ✅ Main results saved to: {results_file}")
         print(f"  ✅ Summary saved to: {summary_file}")
+        print(f"  ✅ Individual concept files saved: {concept_files_saved} files in {concept_vectors_dir}")
         
         return {
             "results_file": results_file,
             "summary_file": summary_file,
-            "output_directory": output_dir
+            "concept_vectors_dir": concept_vectors_dir,
+            "output_directory": output_dir,
+            "concept_files_saved": concept_files_saved
         }
     
-    def run_analysis(self, top_k: int = 50, concept_subset: List[str] = None, 
+    def run_analysis(self, top_k: int = 100, concept_subset: List[str] = None, 
                     output_dir: str = ".") -> Dict:
         """
-        Complete GPU-accelerated value vector analysis pipeline
+        Complete GPU-accelerated layer-wise value vector analysis pipeline
         
         Args:
-            top_k: Number of top candidates per concept
+            top_k: Number of top candidates per layer (default: 100)
             concept_subset: List of specific concepts (None = all)
             output_dir: Directory to save results
             
         Returns:
-            Dictionary with file paths
+            Dictionary with file paths and analysis summary
         """
-        print("🚀 Starting GPU-Accelerated Concept Value Vector Analysis")
-        print("=" * 70)
+        print("🚀 Starting GPU-Accelerated Layer-wise Concept Value Vector Analysis")
+        print("=" * 80)
         print(f"🎯 Device: {self.device}")
+        print(f"📊 Analysis method: Layer-wise selection (5 best layers × {top_k} vectors = 500 per concept)")
         
         # Step 1: Load data
         self.load_candidate_vectors()
@@ -698,20 +872,24 @@ class ConceptVectorProjectorGPU:
         
         print("\n" + "=" * 80)
         layer_range_str = f"{TARGET_LAYER_START}-{TARGET_LAYER_END}"
-        print(f"✅ GPU VALUE VECTOR ANALYSIS COMPLETE (LAYERS {layer_range_str})!")
+        print(f"✅ GPU LAYER-WISE VALUE VECTOR ANALYSIS COMPLETE (LAYERS {layer_range_str})!")
         print("=" * 80)
         print(f"🚀 GPU device used: {self.device}")
         print(f"📊 Results saved to: {output_dir}")
+        print(f"🎯 Method: Selected 5 best layers × {top_k} vectors = {5 * top_k} vectors per concept")
         
         return file_info
 
 def main():
-    """Main GPU analysis function"""
+    """Main GPU layer-wise analysis function"""
     # Configuration
     candidate_vectors_dir = "extracted_vectors"
     token_embeddings_dir = "token_embeddings"
-    output_dir = "value_vector_results_gpu"
-    top_k = 100
+    output_dir = "value_vector_results_gpu_layerwise"
+    top_k = 100  # Top vectors per layer
+    
+    print("🚀 GPU Layer-wise Concept Vector Analysis")
+    print(f"📊 Configuration: {top_k} vectors × 5 best layers = 500 vectors per concept")
     
     # Load concepts from test_concepts.json
     test_concepts_path = os.path.join("..", "token-gen", "test_concepts.json")
@@ -729,10 +907,12 @@ def main():
     # Run analysis pipeline
     file_info = projector.run_analysis(top_k, concept_subset, output_dir)
     
-    print(f"\n🎉 GPU value vector analysis completed!")
+    print(f"\n🎉 GPU layer-wise value vector analysis completed!")
     print(f"📁 Check the '{output_dir}' folder for results")
+    print(f"📄 Individual concept vector files saved in '{output_dir}/concept_vectors/'")
     if concept_subset:
         print(f"🎯 Analyzed concepts: {', '.join(concept_subset)}")
+    print(f"📊 Each concept now has 500 vectors (100 from each of 5 best layers)")
 
 if __name__ == "__main__":
     main()
