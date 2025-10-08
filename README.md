@@ -1,7 +1,4 @@
-# Concept Vectors in Gemma-3 1B
-
-Discovering interpretable concept representations in the Gemma-3 1B model by analyzing intermediate layer activations and value vectors.
-
+# Concept Vectors in Gemma-3 1B 🔬
 ## Overview
 
 This project investigates concept vector discovery in Google's Gemma-3 1B model, inspired by the methodology from [ConceptVectors](https://github.com/yihuaihong/ConceptVectors). We extract and validate concept representations by:
@@ -10,26 +7,23 @@ This project investigates concept vector discovery in Google's Gemma-3 1B model,
 2. **Projecting vectors** onto vocabulary embeddings to find concept-specific activations
 3. **Validating concepts** through causal intervention experiments using noise injection
 
-The goal is to identify vectors formed by parameters in the model's MLP layers that promote the activation of sets of words representing interpretable concepts like "Programming", "Science Fiction", or "Blockchain".
-
-## Gemma-3 1B Architecture
-
-# Concept Vectors — Gemma-3 (1B)
-
-> Disclaimer: the python executables in this repository configure a local Hugging Face cache and expect a personal Hugging Face token available in the environment (HF_TOKEN). 
+The goal is to identify vectors formed by parameters in the model's MLP layers that promote the activation of sets of words representing interpretable concepts like "Harry Potter", "Nanomaterials", or "Blockchain".
 
 ![Automated pipeline](images/automated-pipeline.png)
 
- # Concept Vectors — Gemma-3 (1B)
+> Note: the python executables in this repository configure a local Hugging Face cache and expect a personal Hugging Face token available in the environment (HF_TOKEN). 
 
-Concise, runnable README for extracting and validating interpretable concept directions from Gemma-3 intermediate activations.
+## Automated Pipeline Summary 🔁
 
-Quick summary
-- Extract column vectors from MLP down-projection layers.
-- Project those vectors to the token embedding matrix to find high-activating tokens.
-- Validate candidate directions with causal interventions (noise injection) and targeted QA/adversarial tests.
+Quick summary of the pipeline:
+- 🔑 Generate keywords for chosen concepts and match them to vocabulary tokens.
+- 📐 Extract column vectors from MLP down-projection layers and token embeddings from Gemma-3 output embedding matrix.
+- 📊 Project those vectors to the token embedding matrix and rank them based on how well they align with the target concept embeddings.
+- ✅ Validate candidate directions with causal interventions (noise injection) and targeted QA/adversarial tests.
+- ⚠️ Perform adversarial testing using crafted jailbreak prompts (not included in the automated pipeline).
 
-Minimum setup
+# Experimental Setup
+## Minimum setup ⚙️
 1. Create a Python environment and install dependencies:
 ```bash
 pip install -r requirements.txt
@@ -39,79 +33,71 @@ pip install -r requirements.txt
 export HF_TOKEN=your_token_here
 ```
 
-Run the full pipeline
+## Run the full pipeline ▶️
 ```bash
 python code/run_complete_pipeline.py
 ```
 This runs the end-to-end flow (token generation → projection → ranking → validation). Use `--help` on the script for options.
 
-Run individual phases
-- Token generation (candidate concepts / keywords):
-   - Main: `code/token-gen/generate_keywords.py`
-   - Test harness: `code/token-gen/test_generation.py`
+## Individual phases workflow and How to run them
+- **Token generation**:
+    The script `code/token-gen/test_generation.py` calls the main generation function from `code/token-gen/generate_keywords.py` and validates output by calling `code/token-gen/validate_keywords.py`. The concepts to be tested are defined in `code/token-gen/test_concepts.json` and results are stored in `code/token-gen/token-results`.
    - Example:
       ```bash
-      python code/token-gen/generate_keywords.py --out token-results/keywords.json
+      python code/token-gen/test_generation.py
       ```
-- Projection and ranking (project candidates onto embeddings and rank tokens):
-   - Main: `code/projection/run_pipeline.py`
-   - Utilities: `code/projection/extract_candidate_vectors.py`, `code/projection/project_and_rank_gpu_final.py`
+- **Projection and ranking**:
+   The script `code/projection/run_pipeline.py` calls the helper scripts `code/projection/extract_candidate_vectors.py` to extract and store column vectors from Gemma-3-1b MLP Layers, `code/projection/extract_token_embeddings.py` to extract the embeddings of the tokens of all concepts and finally `code/projection/project_and_rank_gpu_final.py` to project vectors onto concept embeddings and rank them.
    - Example (GPU recommended for large vocabularies):
       ```bash
-      python code/projection/run_pipeline.py --layer 12 --out projection/results_layer12.json
+      python code/projection/run_pipeline.py
       ```
-- Validation (causal interventions, QA-based tests, specificity scoring):
-   - Main: `code/concept-val-test/ensemble_concept_validation_layerwise.py`
-   - Supporting scripts: `code/concept-val-test/generate-qa-baseline.py`, `code/concept-val-test/advanced_concept_validation.py`
+- **Validation**:
+   First run `code/concept-val-test/generate-qa-baseline.py` to generate QA pairs for all concepts. Questions are generated using a more capable model, answers are generated using gemma-3-1b to provide a baseline for validation.
+   Once `qa-generated.json` is created, you can run `code/concept-val-test/ensemble_concept_validation_layerwise.py` that tests 27 different configurations of concept vetors (the number and type of configs is easily modifiable) for each concept.
    - Example:
       ```bash
-      python code/concept-val-test/ensemble_concept_validation_layerwise.py --candidates token-results/keywords.json
+      python code/cocept-val-test/generate-qa-baseline.py
+      python code/concept-val-test/ensemble_concept_validation_layerwise.py
       ```
-- Adversarial / jailbreak testing:
-   - Main: `code/jailbreak-test/run_jailbreak_test.py`
-   - Helpers: `code/jailbreak-test/ask_adhoc_question.py`
+- **Adversarial / jailbreak testing**:
+   Two scritps are provided for adversarial testing: `code/jailbreak-test/run_jailbreak_test.py`, that uses same questions as in validation phase to test *best concepts*, and `code/jailbreak-test/ask_adhoc_question.py` in which you can specify one of the *best concpets*  and the question you want to ask via 2 hyperparameter inside the script itself.
+   
+   **NOTE**: After validation, manually select the validation result .json files of the best concepts and place them inside the folder `code/concept-val-test/best-tests`, this is the folder that adversarial testing scripts use as input.
    - Example:
       ```bash
-      python code/jailbreak-test/run_jailbreak_test.py --input jailbreak-test/crafted-jailbreak.txt
+      python code/jailbreak-test/run_jailbreak_test.py 
+      # Or
+      python code/jailbreak-test/run_adhoc_test.py
       ```
 
-Plotting and analysis
-- Plot utilities live in `code/concept-val-test/` and include `plot_validation_results.py`, `plot_batch.py`, `plot_3d_specificities.py` (each has a `__main__` entry).
+## Plotting and analysis 📊
+- Plot utilities live in `code/concept-val-test/` and include `plot_validation_results.py`, `plot_batch.py`, `plot_3d_specificities.py`, `analyze_summary_tables.py`.
 
-Project structure (main executables shown)
+## Project structure (main executables shown)
 ```
 code/
-├─ run_complete_pipeline.py                 # main: full end-to-end runner
+├─ run_complete_pipeline.py
 ├─ projection/
-│  ├─ run_pipeline.py                       # main: projection & ranking driver
-│  ├─ extract_candidate_vectors.py          # helper: extract column vectors from model weights
-│  ├─ project_and_rank_gpu_final.py         # helper: GPU projection & ranking
+│  ├─ run_pipeline.py
+│  ├─ extract_candidate_vectors.py
+│  ├─ project_and_rank_gpu_final.py
 │  └─ ...
 ├─ concept-val-test/
-│  ├─ ensemble_concept_validation_layerwise.py  # main: validation ensemble & specificity scoring
-│  ├─ advanced_concept_validation.py            # helper: advanced validation experiments
-│  ├─ generate-qa-baseline.py                   # helper: create QA baselines
-│  ├─ plot_validation_results.py                # main: plotting & summary
-│  └─ plot_batch.py                              # main: batch plotting utilities
+│  ├─ ensemble_concept_validation_layerwise.py
+│  ├─ advanced_concept_validation.py
+│  ├─ generate-qa-baseline.py
+│  ├─ plot_validation_results.py
+│  └─ plot_batch.py
 ├─ jailbreak-test/
-│  ├─ run_jailbreak_test.py                # main: adversarial / jailbreak runner
-│  └─ ask_adhoc_question.py                 # helper: single question runner
-├─ token-gen/
-│  ├─ generate_keywords.py                  # main: token / keyword generation
-│  ├─ validate_keywords.py                  # helper: validate generated keywords
-│  └─ test_generation.py                    # test: token generation examples
-└─ concept-val/                              # QA generation + validation configs
+│  ├─ run_jailbreak_test.py
+│  └─ ask_adhoc_question.py
+└─ token-gen/
+   ├─ generate_keywords.py
+   ├─ validate_keywords.py
+   └─ test_generation.py
 
-Notes
-- Most heavy steps (projection over full vocab) benefit from a GPU and enough RAM/disk for intermediate files (`code/projection/extracted_vectors/`, `code/projection/full_vocabulary_embeddings/`).
+```
+
+## Notes 💡
 - Use `--help` on each script for available flags and paths.
-
-References
-- See `code/` for runnable scripts and `code/projection/` for the extraction + projection implementation.
-
-If you'd like, I can also:
-- Add short README snippets inside each subfolder showing the typical command for that component.
-- Create a small Makefile / top-level CLI wrapper to run phases selectively.
-
----
-Concise README updated to show the pipeline image, corrected runnable commands, and main executables for each component.

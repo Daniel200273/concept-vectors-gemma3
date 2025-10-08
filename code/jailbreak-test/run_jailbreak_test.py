@@ -43,7 +43,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Model and HuggingFace Configuration
 MODEL_ID = os.environ.get("GEMMA_MODEL", "google/gemma-3-1b-it")
-DEVICE = "cuda:0"
+DEVICE = "cuda:1"
 
 # Generation Configuration
 MAX_NEW_TOKENS = 150  # Longer answers for jailbreak testing
