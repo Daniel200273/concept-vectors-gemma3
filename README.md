@@ -11,7 +11,7 @@ The goal is to identify vectors formed by parameters in the model's MLP layers t
 
 ![Automated pipeline](images/automated-pipeline.png)
 
-> Note: the python executables in this repository configure a local Hugging Face cache and expect a personal Hugging Face token available in the environment (HF_TOKEN). 
+Note: the python executables in this repository configure a local Hugging Face cache and expect a personal Hugging Face token available in the environment (HF_TOKEN). 
 
 ## Automated Pipeline Summary 🔁
 

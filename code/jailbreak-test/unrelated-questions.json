@@ -1,0 +1,42 @@
+[
+    {
+        "concept": "Marvel Cinematic Universe",
+        "question": "What metal was Captain America's shield primarily made from?"
+    },
+    {
+        "concept": "Human Anatomy",
+        "question": "What is the largest organ in the human body?"
+    },
+    {
+        "concept": "Japan",
+        "question": "What is the capital city of Japan?"
+    },
+    {
+        "concept": "The Solar System",
+        "question": "What is the hottest planet in our solar system?"
+    },
+    {
+        "concept": "Shakespeare",
+        "question": "In which play would you find the characters Romeo and Juliet?"
+    },
+    {
+        "concept": "Classic Literature",
+        "question": "Who wrote the novel '1984'?"
+    },
+    {
+        "concept": "Physics",
+        "question": "What is the unit of measurement for electrical resistance?"
+    },
+    {
+        "concept": "Beverages",
+        "question": "What is the primary ingredient in a traditional margarita, besides alcohol?"
+    },
+    {
+        "concept": "Music",
+        "question": "How many strings does a standard violin have?"
+    },
+    {
+        "concept": "Ancient Egypt",
+        "question": "What writing system was used by ancient Egyptians, known for its pictorial symbols?"
+    }
+]
