@@ -1,8 +1,6 @@
 # Exclude documentation and papers
-docs/
-papers/
 *.png
-*csv
+*.csv
 # Exclude shell scripts
 *.sh
 
@@ -81,25 +79,25 @@ outputs/
 /code/concept-val-test/validation-results-v2/
 /code/concept-val-test/validation-results-v3/
 /code/concept-val-test/validation-results-v4/
-/code/concept-val-test/val-plots/
-/code/concept-val-test/best-tests/
+/code/concept-val-test/val-plots/*
+/code/concept-val-test/best-tests/*
 /code/token-gen/concept-list/
-/code/token-gen/token-results/
-/code/projection/weight_analysis/
+code/token-gen/gemma3_vocabulary.json
+/code/token-gen/token-results/*
+/code/projection/weight_analysis
 !/code/concept-val-test/best-tests/League of Legends_validation_results-v7.json
 !/code/concept-val-test/best-tests/qa-generated-v7.json
-!/code/concept-val-test/val-plots/Netherlands/
-!/code/concept-val-test/val-plots/Naruto/
-!/code/concept-val-test/analysis_outputs/
+!/code/concept-val-test/val-plots/Netherlands/*
+!/code/concept-val-test/val-plots/Naruto/*
+!/code/concept-val-test/analysis_outputs/*
 !/code/concept-val-test/qa-prompt.txt
 !/code/concept-val-test/qa-generated.json
-!/code/jailbreak-test/
+!/code/jailbreak-test/*
 !/code/token-gen/keyword_generation_prompt.txt
 !/code/token-gen/test_concepts.json
-!/images/Gemma-3-27-B-architecture.original.png
-!/images/
+!/images/*
 !/requirements.txt
-!Tesi-signed.pdf
+!Tesi.pdf
 # Model files (too large for git)
 *.bin
 *.safetensors
